@@ -5,7 +5,7 @@ use zastava_lib::auditor::leaks::{is_russian_or_belarusian_timezone, RUSSIAN_TIM
 use zastava_lib::auditor::rules::{DangerousAsns, ProviderMatrix};
 use std::net::IpAddr;
 use zastava_lib::bin_checker::BinChecker;
-use zastava_lib::proxy::server::{is_forbidden_ip, parse_host_port, validate_tunnel_target};
+use zastava_lib::proxy::server::{is_forbidden_ip, is_tun_fake_ip, parse_host_port, validate_tunnel_target};
 use zastava_lib::state::{AppState, AppStateData, IpHistoryEntry};
 
 #[test]
@@ -178,12 +178,20 @@ fn test_security_ssrf_and_proxy_loop_prevention() {
     assert!(validate_tunnel_target("::1", 443, proxy_port).is_err());
     assert!(validate_tunnel_target("fe80::1", 443, proxy_port).is_err());
     assert!(validate_tunnel_target("fd00::1", 443, proxy_port).is_err());
+    assert!(validate_tunnel_target("198.18.0.1", 443, proxy_port).is_err());
+    assert!(validate_tunnel_target("198.19.255.1", 443, proxy_port).is_err());
 
     // Verify is_forbidden_ip directly
     assert!(is_forbidden_ip(&"127.0.0.1".parse::<IpAddr>().unwrap()));
     assert!(is_forbidden_ip(&"169.254.169.254".parse::<IpAddr>().unwrap()));
     assert!(!is_forbidden_ip(&"1.1.1.1".parse::<IpAddr>().unwrap()));
     assert!(!is_forbidden_ip(&"2606:4700:4700::1111".parse::<IpAddr>().unwrap()));
+
+    // Verify is_tun_fake_ip identifies FakeIP pool (198.18.0.0/15)
+    assert!(is_tun_fake_ip(&"198.18.0.1".parse::<IpAddr>().unwrap()));
+    assert!(is_tun_fake_ip(&"198.19.254.254".parse::<IpAddr>().unwrap()));
+    assert!(!is_tun_fake_ip(&"198.20.0.1".parse::<IpAddr>().unwrap()));
+    assert!(!is_tun_fake_ip(&"1.1.1.1".parse::<IpAddr>().unwrap()));
 }
 
 #[test]

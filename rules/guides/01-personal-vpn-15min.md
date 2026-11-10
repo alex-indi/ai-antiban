@@ -35,6 +35,20 @@
      *(Amnezia сама подключится к серверу по SSH и за 2 минуты установит современный маскированный протокол AmneziaWG или Xray Reality без единой команды в терминале).*
    * **[Экран 3]** Нажмите большую зеленую круглую кнопку **«Подключиться»**.
 
+> [!NOTE]
+> ### ⚡ Не подключается рекомендованный сервер в Amnezia? Установите VLESS-XHTTP-TLS / Reality в 1 команду
+>
+> Провайдеры ТСПУ иногда блокируют стандартные порты установщика Amnezia. Этот скрипт за 1 минуту поднимает на вашем VPS неубиваемый протокол VLESS + XHTTP + TLS (Reality), который маскируется под обычный сайт и работает в клиентах Throne, Hiddify, v2rayN, Streisand и AmneziaVPN:
+>
+> 1. **Авто-установщик VLESS + XHTTP + TLS / Reality (1 команда без панели):**
+>    ```bash
+>    bash <(curl -fsSL https://raw.githubusercontent.com/zxcvos/Xray-script/main/install.sh)
+>    ```
+> 2. **Панель 3X-UI (VLESS-XHTTP-TLS и Reality с веб-интерфейсом и QR-кодами):**
+>    ```bash
+>    bash <(curl -Ls https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh)
+>    ```
+
 ---
 
 ### Шаг 3. Проверка и закрепление IP в Заставе

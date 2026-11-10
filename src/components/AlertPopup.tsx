@@ -8,6 +8,7 @@ import {
   CheckCircle2,
   ArrowRight,
   Clock,
+  X,
 } from "lucide-react";
 import { InterceptionAction, RiskInterceptPayload } from "../types";
 import { resolveInterception } from "../utils/api";
@@ -166,11 +167,25 @@ export const AlertPopup: React.FC<AlertPopupProps> = ({
     return () => clearInterval(timer);
   }, [secondsRemaining, isDemo]);
 
-  const handleAction = async (action: InterceptionAction) => {
-    if (resolving || demoFeedback) return;
+  const handleAction = async (action: InterceptionAction, immediate: boolean = false) => {
+    if (resolving) return;
     setResolving(true);
 
     if (isDemo) {
+      if (immediate) {
+        try {
+          await resolveInterception(
+            payload.id,
+            action,
+            payload.provider,
+            "simulation"
+          );
+        } catch (_) {}
+        if (onResolved) onResolved(action);
+        setResolving(false);
+        return;
+      }
+
       let feedbackText = "Демо-режим: в реальной ситуации шлюз остановил бы трафик до включения VPN";
       if (action === "AllowSession") {
         feedbackText = "Демо-режим: сессия была бы разрешена";
@@ -188,10 +203,10 @@ export const AlertPopup: React.FC<AlertPopupProps> = ({
             payload.provider,
             "simulation"
           );
-          if (onResolved) onResolved(action);
         } catch (err) {
           console.error("Failed to resolve demo interception:", err);
         } finally {
+          if (onResolved) onResolved(action);
           setResolving(false);
         }
       }, 900);
@@ -208,6 +223,7 @@ export const AlertPopup: React.FC<AlertPopupProps> = ({
       if (onResolved) onResolved(action);
     } catch (err) {
       console.error("Failed to resolve interception:", err);
+      if (onResolved) onResolved(action);
     } finally {
       setResolving(false);
     }
@@ -215,7 +231,7 @@ export const AlertPopup: React.FC<AlertPopupProps> = ({
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (resolving || demoFeedback) return;
+      if (resolving) return;
       if (e.key === "1") {
         e.preventDefault();
         handleAction("OpenGuideAndBlock");
@@ -224,7 +240,7 @@ export const AlertPopup: React.FC<AlertPopupProps> = ({
         handleAction("AllowSession");
       } else if (e.key === "3" || e.key === "Escape") {
         e.preventDefault();
-        handleAction("BlockUntilNetworkChange");
+        handleAction("BlockUntilNetworkChange", e.key === "Escape");
       }
     };
 
@@ -277,15 +293,31 @@ export const AlertPopup: React.FC<AlertPopupProps> = ({
           </div>
         )}
 
-        <div
-          className={`flex items-center gap-1 px-2 py-0.5 rounded-full border text-[10px] font-mono font-bold tabular-nums shrink-0 ml-2 ${
-            isDemo
-              ? "bg-sky-500/15 border-sky-500/30 text-sky-300"
-              : "bg-rose-500/15 border-rose-500/30 text-rose-300"
-          }`}
-        >
-          <Clock className="w-2.5 h-2.5 shrink-0" />
-          <span>{secondsRemaining}с</span>
+        <div className="flex items-center gap-1.5 shrink-0 ml-2">
+          <div
+            className={`flex items-center gap-1 px-2 py-0.5 rounded-full border text-[10px] font-mono font-bold tabular-nums ${
+              isDemo
+                ? "bg-sky-500/15 border-sky-500/30 text-sky-300"
+                : "bg-rose-500/15 border-rose-500/30 text-rose-300"
+            }`}
+          >
+            <Clock className="w-2.5 h-2.5 shrink-0" />
+            <span>{secondsRemaining}с</span>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => {
+              handleAction("BlockUntilNetworkChange", true);
+              if (onResolved) onResolved("BlockUntilNetworkChange");
+            }}
+            disabled={resolving}
+            title="Закрыть окно (ИИ останется на безопасной паузе до включения VPN)"
+            className="p-1 rounded-md text-zinc-400 hover:text-white hover:bg-white/[0.08] active:scale-95 transition-all cursor-pointer disabled:opacity-40"
+            aria-label="Закрыть окно"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
         </div>
       </div>
 
@@ -353,7 +385,7 @@ export const AlertPopup: React.FC<AlertPopupProps> = ({
         >
           <div className="flex items-center gap-1.5 min-w-0">
             <Zap className="w-3.5 h-3.5 fill-zinc-950 shrink-0" strokeWidth={2} />
-            <span className="truncate">1. Включить Чистый IP / Свой VPN</span>
+            <span className="truncate">1. Открыть инструкцию: Свой VPN</span>
           </div>
           <span className="text-[9.5px] font-mono bg-zinc-950/20 px-1.5 py-0.5 rounded text-zinc-900 shrink-0 font-bold">
             [1]

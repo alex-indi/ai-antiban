@@ -227,6 +227,47 @@ impl NetworkGuard {
         self.gate_tx.send_replace(gate);
     }
 
+    pub fn is_gate_blocked(&self) -> bool {
+        self.gate() == Gate::Blocked
+    }
+
+    pub async fn set_manual_killswitch(&self, freeze: bool, state: &AppState) -> bool {
+        if freeze {
+            self.abort_active_tunnels();
+            self.set_gate(Gate::Blocked);
+            let mut inner = self.inner.lock().await;
+            if let Some(p) = inner.pending.take() {
+                if let Some(ctx) = self.ctx.get() {
+                    ctx.hold_queue.remove(&p.id).await;
+                }
+            }
+            drop(inner);
+            for p in KNOWN_PROVIDERS {
+                let _ = state.block_provider(p).await;
+            }
+            if let Some(ctx) = self.ctx.get() {
+                self.hide_popup(ctx);
+                crate::update_tray_status(&ctx.app, "red", Some("⛔ СТОП СЕТИ (Ручная блокировка ИИ)"));
+            }
+            true
+        } else {
+            self.set_gate(Gate::Open);
+            let mut inner = self.inner.lock().await;
+            if let Some(p) = inner.pending.take() {
+                if let Some(ctx) = self.ctx.get() {
+                    ctx.hold_queue.remove(&p.id).await;
+                }
+            }
+            drop(inner);
+            let _ = state.clear_blocked_providers().await;
+            if let Some(ctx) = self.ctx.get() {
+                self.hide_popup(ctx);
+                crate::update_tray_status(&ctx.app, "green", None);
+            }
+            false
+        }
+    }
+
     pub async fn freeze_for_test(&self) {
         self.set_gate(Gate::Blocked);
         self.abort_active_tunnels();
@@ -335,13 +376,39 @@ impl NetworkGuard {
 
         if route_changed {
             inner.last_route_fp = Some(current_fp.clone());
-            // 1. Immediately freeze gate
+            // 1. Immediately freeze gate (so zero packets leak during the probe!)
             self.set_gate(Gate::Pending);
-            // 2. Abort all open keep-alive tunnels
+
+            // 2. Probe external IP
+            let probed = self.probe_ip().await;
+            inner.last_probe = Some(Instant::now());
+
+            // 3. Check if probed IP equals baseline IP
+            let (baseline_ip, baseline_trusted) = inner
+                .baseline
+                .as_ref()
+                .map(|b| (b.ip.clone(), b.trusted))
+                .unzip();
+            let baseline_trusted = baseline_trusted.unwrap_or(false);
+
+            if let Some(ref new_ip) = probed {
+                inner.observed_ip = Some(new_ip.clone());
+
+                if baseline_ip.as_deref() == Some(new_ip.as_str()) {
+                    // The external IP did NOT change at all — local utun refresh on macOS (e.g. Amnezia)!
+                    if baseline_trusted {
+                        self.set_gate(Gate::Open);
+                        return;
+                    }
+                    if inner.handled_ip.as_deref() == Some(new_ip.as_str()) {
+                        return;
+                    }
+                }
+            }
+
+            // 4. Only if new_ip actually changed (or if probed is None / different from baseline):
             self.abort_active_tunnels();
-            // 3. Invalidate telemetry cache
             ctx.auditor.resolver.invalidate_cache().await;
-            // 4. Record intercepted event in traffic stats
             let old_country = inner
                 .baseline
                 .as_ref()
@@ -351,73 +418,8 @@ impl NetworkGuard {
                 .stats()
                 .record_intercepted("all", "NetworkGuard", "HELD", &old_country);
 
-            // 5. Instantly show top-center hold popup (<250ms) BEFORE slow remote network calls
-            let id = Uuid::new_v4().to_string();
-            let rx = ctx.hold_queue.register(id.clone(), ALL_PROVIDERS).await;
-            if let Some(p) = inner.pending.take() {
-                ctx.hold_queue.remove(&p.id).await;
-            }
-            inner.pending = Some(Pending { id: id.clone() });
-
-            let old = inner.baseline.clone();
-            let hold_report = RiskReport {
-                provider: ProviderId::Anthropic,
-                overall_status: OverallStatus::Red,
-                trust_score: 0,
-                telemetry: NetworkTelemetry {
-                    ip: "Проверка новой сети...".to_string(),
-                    country_code: "??".to_string(),
-                    hostname: None,
-                    asn: None,
-                    org: None,
-                    isp: None,
-                    timezone: None,
-                    resolved_at: crate::auditor::network::current_timestamp(),
-                },
-                geo_result: crate::auditor::CheckResult::critical(
-                    "NETWORK_CHANGED",
-                    "Обнаружен обрыв VPN или смена сетевого интерфейса. Трафик ИИ мгновенно заморожен до проверки.",
-                    None,
-                ),
-                pinning_result: crate::auditor::CheckResult::critical(
-                    "HOLD_ACTIVE",
-                    "Соединения заморожены для защиты сессии ИИ.",
-                    None,
-                ),
-                travel_result: crate::auditor::CheckResult::ok("TRAVEL_HOLD", "Проверка параметров..."),
-                dnsbl_result: crate::auditor::CheckResult::ok("DNSBL_HOLD", "Проверка..."),
-                dnsbl_clean_count: "0/0".to_string(),
-                asn_result: crate::auditor::CheckResult::ok("ASN_HOLD", "Проверка..."),
-                ipv6_result: crate::auditor::CheckResult::ok("IPV6_HOLD", "Проверка..."),
-                timezone_result: crate::auditor::CheckResult::ok("TZ_HOLD", "Проверка..."),
-                checks: vec![],
-            };
-
-            let payload = RiskInterceptPayload {
-                id: id.clone(),
-                provider: ProviderId::Anthropic,
-                host: "Смена сети · все ИИ-сервисы".to_string(),
-                report: hold_report,
-                ttl_seconds: DEFAULT_HOLD_TTL_SECS,
-                scope: "network".to_string(),
-                network_change: Some(NetworkChange {
-                    old_ip: old.as_ref().map(|b| b.ip.clone()),
-                    old_country: old.as_ref().and_then(|b| b.country.clone()),
-                    new_ip: "Проверка новой сети...".to_string(),
-                    new_country: "??".to_string(),
-                }),
-                is_simulation: false,
-            };
-
-            let _ = ctx.app.emit("interceptor://risk-detected", &payload);
-            crate::show_and_position_alert_popup(&ctx.app);
-
-            // Now probe the new IP and perform full re-audit
-            let probed = self.probe_ip().await;
-            inner.last_probe = Some(Instant::now());
             if let Some(new_ip) = probed {
-                inner.observed_ip = Some(new_ip.clone());
-                self.handle_change_locked_with_hold(ctx, &mut inner, new_ip, id, rx).await;
+                self.handle_change_locked(ctx, &mut inner, new_ip).await;
             }
             return;
         }
@@ -489,106 +491,6 @@ impl NetworkGuard {
         self.check_route_and_tick(ctx).await;
     }
 
-    async fn handle_change_locked_with_hold(
-        self: &Arc<Self>,
-        ctx: &GuardCtx,
-        inner: &mut Inner,
-        new_ip: String,
-        id: String,
-        rx: tokio::sync::oneshot::Receiver<HoldResolution>,
-    ) {
-        let _ = ctx.state.clear_session_allowed_providers().await;
-        let _ = ctx.state.clear_blocked_providers().await;
-        ctx.auditor.resolver.invalidate_cache().await;
-
-        let reports = match audit_all(ctx).await {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("Network guard: audit of the new network failed: {e}");
-                return;
-            }
-        };
-        inner.handled_ip = Some(new_ip.clone());
-
-        let mut worst = &reports[0];
-        for r in &reports[1..] {
-            if severity(r) > severity(worst) {
-                worst = r;
-            }
-        }
-        let worst = worst.clone();
-        let tel = worst.telemetry.clone();
-
-        let st = ctx.state.get_data().await;
-        let is_pinned = st
-            .pinned_ip
-            .as_deref()
-            .map(|p| p.trim() == new_ip.trim() || p.trim() == tel.ip.trim())
-            .unwrap_or(false);
-        let all_green = reports
-            .iter()
-            .all(|r| r.overall_status == OverallStatus::Green);
-
-        self.update_tray(ctx, &reports[0]).await;
-
-        if is_pinned && all_green {
-            self.accept_locked(ctx, inner, &new_ip, &tel).await;
-            return;
-        }
-
-        let old = inner.baseline.clone();
-        let payload = RiskInterceptPayload {
-            id: id.clone(),
-            provider: worst.provider,
-            host: "Смена сети · все ИИ-сервисы".to_string(),
-            report: worst.clone(),
-            ttl_seconds: DEFAULT_HOLD_TTL_SECS,
-            scope: "network".to_string(),
-            network_change: Some(NetworkChange {
-                old_ip: old.as_ref().map(|b| b.ip.clone()),
-                old_country: old.as_ref().and_then(|b| b.country.clone()),
-                new_ip: tel.ip.clone(),
-                new_country: tel.country_code.clone(),
-            }),
-            is_simulation: false,
-        };
-
-        let _ = ctx.app.emit("interceptor://risk-detected", &payload);
-        crate::show_and_position_alert_popup(&ctx.app);
-        let _ = ctx.app.emit("network://changed", &worst);
-
-        let guard = Arc::clone(self);
-        let ctx2 = ctx.clone();
-        tauri::async_runtime::spawn(async move {
-            let res = tokio::time::timeout(Duration::from_secs(DEFAULT_HOLD_TTL_SECS), rx).await;
-            let allow = matches!(res, Ok(Ok(HoldResolution::Allow)));
-
-            let mut inner = guard.inner.lock().await;
-            let still_current = inner
-                .pending
-                .as_ref()
-                .map(|p| p.id == id)
-                .unwrap_or(false);
-            if !still_current {
-                return;
-            }
-            inner.pending = None;
-            ctx2.hold_queue.remove(&id).await;
-
-            if allow {
-                let ip = inner.observed_ip.clone().unwrap_or_else(|| tel.ip.clone());
-                guard.accept_locked(&ctx2, &mut inner, &ip, &tel).await;
-            } else {
-                for p in KNOWN_PROVIDERS {
-                    let _ = ctx2.state.block_provider(p).await;
-                }
-                guard.set_gate(Gate::Blocked);
-                guard.hide_popup(&ctx2);
-                guard.refresh_tray(&ctx2).await;
-            }
-        });
-    }
-
     async fn handle_change_locked(
         self: &Arc<Self>,
         ctx: &GuardCtx,
@@ -615,6 +517,13 @@ impl NetworkGuard {
                 return; // gate stays closed, next tick retries
             }
         };
+
+        let old = inner.baseline.clone();
+        if old.as_ref().map(|b| b.ip.as_str()) == Some(new_ip.as_str())
+            && inner.handled_ip.as_deref() == Some(new_ip.as_str())
+        {
+            return;
+        }
         inner.handled_ip = Some(new_ip.clone());
 
         let mut worst = &reports[0];
@@ -644,7 +553,43 @@ impl NetworkGuard {
             return;
         }
 
-        // 4. Ask the user (popup), traffic stays frozen.
+        // Respect preset InterceptionBehavior
+        match ctx.state.get_interception_behavior().await {
+            crate::state::InterceptionBehavior::AutoLockSilent => {
+                for p in KNOWN_PROVIDERS {
+                    let _ = ctx.state.block_provider(p).await;
+                }
+                self.set_gate(Gate::Blocked);
+                self.hide_popup(ctx);
+                self.update_tray(ctx, &worst).await;
+                let _ = ctx.app.emit("network://changed", &worst);
+                return;
+            }
+            crate::state::InterceptionBehavior::AutoAllowTrusted => {
+                let is_blocked = crate::is_sanctioned_or_blocked_country(&tel.country_code)
+                    || tel.country_code.eq_ignore_ascii_case("HK")
+                    || tel.country_code.eq_ignore_ascii_case("CN");
+                if !is_blocked {
+                    self.accept_locked(ctx, inner, &new_ip, &tel).await;
+                    let _ = ctx.app.emit("network://changed", &worst);
+                    return;
+                } else {
+                    for p in KNOWN_PROVIDERS {
+                        let _ = ctx.state.block_provider(p).await;
+                    }
+                    self.set_gate(Gate::Blocked);
+                    self.hide_popup(ctx);
+                    self.update_tray(ctx, &worst).await;
+                    let _ = ctx.app.emit("network://changed", &worst);
+                    return;
+                }
+            }
+            crate::state::InterceptionBehavior::AskPopup => {
+                // proceed with hold_queue and show_and_position_alert_popup
+            }
+        }
+
+        // 4. Ask the user (popup in configured corner without stealing focus), traffic stays frozen.
         let id = Uuid::new_v4().to_string();
         let rx = ctx
             .hold_queue
@@ -652,7 +597,6 @@ impl NetworkGuard {
             .await;
         inner.pending = Some(Pending { id: id.clone() });
 
-        let old = inner.baseline.clone();
         let payload = RiskInterceptPayload {
             id: id.clone(),
             provider: worst.provider,
@@ -887,5 +831,31 @@ mod tests {
         let changed = guard.check_route_fingerprint_sync(Some("socks5://new"));
         assert!(changed);
         assert_eq!(guard.gate(), Gate::Pending);
+    }
+
+    #[tokio::test]
+    async fn test_manual_killswitch_toggle() {
+        let guard = NetworkGuard::new();
+        assert!(!guard.is_gate_blocked());
+
+        let state = AppState::new_in_memory();
+
+        // Freeze
+        let frozen = guard.set_manual_killswitch(true, &state).await;
+        assert!(frozen);
+        assert!(guard.is_gate_blocked());
+        assert_eq!(guard.gate(), Gate::Blocked);
+        for p in KNOWN_PROVIDERS {
+            assert!(state.is_provider_blocked(p).await);
+        }
+
+        // Unfreeze
+        let unfrozen = guard.set_manual_killswitch(false, &state).await;
+        assert!(!unfrozen);
+        assert!(!guard.is_gate_blocked());
+        assert_eq!(guard.gate(), Gate::Open);
+        for p in KNOWN_PROVIDERS {
+            assert!(!state.is_provider_blocked(p).await);
+        }
     }
 }

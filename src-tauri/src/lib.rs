@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tauri::{
     image::Image,
-    menu::{Menu, MenuItem, PredefinedMenuItem},
+    menu::{IconMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Emitter, Manager,
 };
@@ -20,29 +20,49 @@ pub const MAIN_TRAY_ID: &str = "main-tray";
 #[derive(Clone)]
 pub struct TrayStatsMenuItem(pub MenuItem<tauri::Wry>);
 
+#[derive(Clone)]
+pub struct TrayKillswitchMenuItem(pub IconMenuItem<tauri::Wry>);
+
+#[derive(Clone)]
+pub struct TrayStatusMenuItem(pub IconMenuItem<tauri::Wry>);
+
 const TRAY_ICON_GREEN: &[u8] = include_bytes!("../icons/tray-green.png");
 const TRAY_ICON_YELLOW: &[u8] = include_bytes!("../icons/tray-yellow.png");
 const TRAY_ICON_RED: &[u8] = include_bytes!("../icons/tray-red.png");
 
-/// Positions the alert-popup window directly under the notch / top-center of the screen
-/// and brings it to front with focus.
+/// Positions the alert-popup window directly under the notch or top-right of the screen
+/// without stealing keyboard focus.
 pub fn show_and_position_alert_popup(app: &tauri::AppHandle) {
     if let Some(popup) = app.get_webview_window("alert-popup") {
         let _ = popup.set_shadow(false);
         let _ = popup.set_decorations(false);
+        let pos_setting = app
+            .try_state::<state::AppState>()
+            .map(|s| s.get_popup_position_sync())
+            .unwrap_or(state::PopupPosition::TopRight);
+
         if let Ok(Some(monitor)) = popup.primary_monitor() {
             let scale = monitor.scale_factor();
             let mon_size = monitor.size();
             let win_width = 440.0;
             let mon_width = mon_size.width as f64 / scale;
-            let x = ((mon_width - win_width) / 2.0).max(0.0);
-            let y = 0.0;
+
+            let (x, y) = match pos_setting {
+                state::PopupPosition::TopRight => {
+                    let right_x = (mon_width - win_width - 24.0).max(0.0);
+                    (right_x, 24.0)
+                }
+                state::PopupPosition::TopCenter => {
+                    let center_x = ((mon_width - win_width) / 2.0).max(0.0);
+                    (center_x, 0.0)
+                }
+            };
             let _ = popup.set_position(tauri::Position::Logical(tauri::LogicalPosition::new(x, y)));
         }
         let _ = popup.show();
         let _ = popup.unminimize();
         let _ = popup.set_always_on_top(true);
-        let _ = popup.set_focus();
+        // Note: intentionally do NOT call popup.set_focus() so user's active editor/terminal does not lose focus
     } else if let Some(main_win) = app.get_webview_window("main") {
         let _ = main_win.show();
         let _ = main_win.set_focus();
@@ -65,19 +85,19 @@ pub fn update_tray_from_report(
     if let Some(tray) = app.tray_by_id(MAIN_TRAY_ID) {
         let country = &report.telemetry.country_code;
 
-        let (icon_bytes, status_label, dot) = if has_blocked {
-            (TRAY_ICON_RED, " ⛔ СТОП СЕТИ".to_string(), "🔴")
+        let (icon_bytes, status_label) = if has_blocked {
+            (TRAY_ICON_RED, " СТОП СЕТИ".to_string())
         } else {
             match report.overall_status {
                 auditor::OverallStatus::Green => {
-                    let pin_mark = if is_pinned { " 📌" } else { "" };
-                    (TRAY_ICON_GREEN, format!(" Защита · {country}{pin_mark}"), "🟢")
+                    let pin_mark = if is_pinned { " · Закреплён" } else { "" };
+                    (TRAY_ICON_GREEN, format!(" Защита · {country}{pin_mark}"))
                 }
                 auditor::OverallStatus::Yellow => {
-                    (TRAY_ICON_YELLOW, format!(" Риск · {country}"), "🟡")
+                    (TRAY_ICON_YELLOW, format!(" Внимание · {country}"))
                 }
                 auditor::OverallStatus::Red => {
-                    (TRAY_ICON_RED, " ⛔ СТОП СЕТИ".to_string(), "🔴")
+                    (TRAY_ICON_RED, " СТОП СЕТИ".to_string())
                 }
             }
         };
@@ -89,7 +109,7 @@ pub fn update_tray_from_report(
             .map(|s| s.stats().snapshot_sync())
             .unwrap_or_default();
         let tooltip = format!(
-            "Zastava {dot} IP: {} ({}) · Защищено ИИ: {} · Отбито утечек: {}",
+            "Застава · IP: {} ({}) · Защищено запросов: {} · Отражено сбоев: {}",
             report.telemetry.ip, country, stats.protected_ai_requests, stats.intercepted_leaks
         );
         let _ = tray.set_tooltip(Some(&tooltip));
@@ -100,9 +120,54 @@ pub fn update_tray_from_report(
 
         if let Some(item) = app.try_state::<TrayStatsMenuItem>() {
             let _ = item.0.set_text(format!(
-                "🛡 Защищено ИИ: {} · Сбоев VPN: {}",
+                "Защищено запросов: {} · Отражено сбоев: {}",
                 stats.protected_ai_requests, stats.intercepted_leaks
             ));
+        }
+
+        if let Some(status_item) = app.try_state::<TrayStatusMenuItem>() {
+            let (header_text, header_icon) = if has_blocked {
+                ("Застава v1.3.0 — СТОП СЕТИ", TRAY_ICON_RED)
+            } else {
+                match report.overall_status {
+                    auditor::OverallStatus::Green => ("Застава v1.3.0 — Шлюз активен", TRAY_ICON_GREEN),
+                    auditor::OverallStatus::Yellow => ("Застава v1.3.0 — Требуется внимание", TRAY_ICON_YELLOW),
+                    auditor::OverallStatus::Red => ("Застава v1.3.0 — СТОП СЕТИ", TRAY_ICON_RED),
+                }
+            };
+            let _ = status_item.0.set_text(header_text);
+            if let Ok(img) = Image::from_bytes(header_icon) {
+                let _ = status_item.0.set_icon(Some(img));
+            }
+        }
+
+        if let Some(ks_item) = app.try_state::<TrayKillswitchMenuItem>() {
+            let (ks_text, ks_icon) = if has_blocked {
+                ("Снять СТОП СЕТИ — Возобновить работу ИИ", TRAY_ICON_GREEN)
+            } else {
+                ("СТОП СЕТИ — Заморозить трафик ИИ", TRAY_ICON_RED)
+            };
+            let _ = ks_item.0.set_text(ks_text);
+            if let Ok(img) = Image::from_bytes(ks_icon) {
+                let _ = ks_item.0.set_icon(Some(img));
+            }
+        }
+    }
+}
+
+/// Updates the system tray icon, menu bar title (macOS), and tooltip with a simple color and status title.
+pub fn update_tray_status(app: &tauri::AppHandle, color: &str, title_override: Option<&str>) {
+    if let Some(tray) = app.tray_by_id(MAIN_TRAY_ID) {
+        let (icon_bytes, default_title) = match color {
+            "red" => (TRAY_ICON_RED, " СТОП СЕТИ"),
+            "yellow" => (TRAY_ICON_YELLOW, " Внимание"),
+            _ => (TRAY_ICON_GREEN, " Защита"),
+        };
+        let title = title_override.unwrap_or(default_title);
+        let _ = tray.set_title(Some(title));
+        let _ = tray.set_tooltip(Some(&format!("Застава · {title}")));
+        if let Ok(img) = Image::from_bytes(icon_bytes) {
+            let _ = tray.set_icon(Some(img));
         }
     }
 }
@@ -655,8 +720,9 @@ async fn create_claude_profile_cmd(
     name: String,
     bind_ip: Option<String>,
     bind_country: Option<String>,
+    bind_upstream_key: Option<String>,
 ) -> Result<auditor::profile_switcher::ClaudeProfileListResponse, String> {
-    auditor::profile_switcher::create_claude_profile(&name, bind_ip, bind_country)
+    auditor::profile_switcher::create_claude_profile(&name, bind_ip, bind_country, bind_upstream_key)
 }
 
 #[tauri::command]
@@ -667,6 +733,11 @@ async fn switch_claude_profile_cmd(
     let res = auditor::profile_switcher::switch_claude_profile(&target_id)?;
     if let Some(ref ip) = res.active_profile.bound_ip {
         let _ = state.set_pinned_ip(Some(ip.clone())).await;
+    }
+    if let Some(ref key) = res.bound_upstream_key_updated {
+        if let Ok(parsed) = proxy::upstream::parse_upstream_key(key) {
+            let _ = state.set_upstream_proxy(Some(parsed)).await;
+        }
     }
     Ok(res)
 }
@@ -685,6 +756,71 @@ async fn bind_ip_to_claude_profile_cmd(
     bind_country: Option<String>,
 ) -> Result<auditor::profile_switcher::ClaudeProfileListResponse, String> {
     auditor::profile_switcher::update_profile_bound_ip(&profile_id, bind_ip, bind_country)
+}
+
+#[tauri::command]
+async fn bind_upstream_to_claude_profile_cmd(
+    profile_id: String,
+    upstream_key: Option<String>,
+) -> Result<auditor::profile_switcher::ClaudeProfileListResponse, String> {
+    auditor::profile_switcher::update_profile_bound_upstream(&profile_id, upstream_key)
+}
+
+// -----------------------------------------------------------------------------
+// Interception Behavior, Popup Position & Custom AI Domains Commands
+// -----------------------------------------------------------------------------
+
+#[tauri::command]
+async fn get_interception_behavior_cmd(
+    state: tauri::State<'_, state::AppState>,
+) -> Result<state::InterceptionBehavior, String> {
+    Ok(state.get_interception_behavior().await)
+}
+
+#[tauri::command]
+async fn set_interception_behavior_cmd(
+    behavior: state::InterceptionBehavior,
+    state: tauri::State<'_, state::AppState>,
+) -> Result<(), String> {
+    state.set_interception_behavior(behavior).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn get_popup_position_cmd(
+    state: tauri::State<'_, state::AppState>,
+) -> Result<state::PopupPosition, String> {
+    Ok(state.get_popup_position().await)
+}
+
+#[tauri::command]
+async fn set_popup_position_cmd(
+    position: state::PopupPosition,
+    state: tauri::State<'_, state::AppState>,
+) -> Result<(), String> {
+    state.set_popup_position(position).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn get_custom_ai_domains_cmd(
+    state: tauri::State<'_, state::AppState>,
+) -> Result<Vec<String>, String> {
+    Ok(state.get_custom_ai_domains().await)
+}
+
+#[tauri::command]
+async fn add_custom_ai_domain_cmd(
+    domain: String,
+    state: tauri::State<'_, state::AppState>,
+) -> Result<Vec<String>, String> {
+    state.add_custom_ai_domain(domain).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn remove_custom_ai_domain_cmd(
+    domain: String,
+    state: tauri::State<'_, state::AppState>,
+) -> Result<Vec<String>, String> {
+    state.remove_custom_ai_domain(&domain).await.map_err(|e| e.to_string())
 }
 
 // -----------------------------------------------------------------------------
@@ -847,6 +983,42 @@ async fn set_warmup_timer(
     Ok(timestamp)
 }
 
+#[tauri::command]
+fn force_clean_os_proxy_cmd() -> Result<Vec<String>, String> {
+    Ok(sysproxy::force_clean_all_os_proxy_traces())
+}
+
+#[tauri::command]
+async fn toggle_network_killswitch_cmd(
+    freeze: Option<bool>,
+    guard: tauri::State<'_, std::sync::Arc<proxy::NetworkGuard>>,
+    state: tauri::State<'_, AppContext>,
+    app: tauri::AppHandle,
+) -> Result<bool, String> {
+    let target_freeze = freeze.unwrap_or(!guard.is_gate_blocked());
+    let now_frozen = guard.set_manual_killswitch(target_freeze, &state).await;
+    if let Some(item) = app.try_state::<TrayKillswitchMenuItem>() {
+        let (new_text, new_icon) = if now_frozen {
+            ("Снять СТОП СЕТИ — Возобновить работу ИИ", TRAY_ICON_GREEN)
+        } else {
+            ("СТОП СЕТИ — Заморозить трафик ИИ", TRAY_ICON_RED)
+        };
+        let _ = item.0.set_text(new_text);
+        if let Ok(img) = Image::from_bytes(new_icon) {
+            let _ = item.0.set_icon(Some(img));
+        }
+    }
+    let _ = app.emit("tray://killswitch-toggled", now_frozen);
+    Ok(now_frozen)
+}
+
+#[tauri::command]
+async fn get_network_killswitch_status_cmd(
+    guard: tauri::State<'_, std::sync::Arc<proxy::NetworkGuard>>,
+) -> Result<bool, String> {
+    Ok(guard.is_gate_blocked())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -919,18 +1091,21 @@ pub fn run() {
                 app: app.handle().clone(),
             });
 
-            // Native Russian tray menu with live actions & control center
-            let status_i = MenuItem::with_id(
+            // Native Russian tray menu with pro-utility typography & branded icons
+            let status_i = IconMenuItem::with_id(
                 app,
                 "status_header",
-                "🛡️ Застава: Сетевой шлюз активен",
+                "Застава v1.3.0 — Шлюз активен",
                 false,
+                Image::from_bytes(TRAY_ICON_GREEN).ok(),
                 None::<&str>,
             )?;
+            app.manage(TrayStatusMenuItem(status_i.clone()));
+
             let stats_i = MenuItem::with_id(
                 app,
                 "stats_header",
-                "🛡 Защищено ИИ: 0 · Сбоев VPN: 0",
+                "Защищено запросов: 0 · Отражено сбоев: 0",
                 false,
                 None::<&str>,
             )?;
@@ -939,85 +1114,206 @@ pub fn run() {
             let show_i = MenuItem::with_id(
                 app,
                 "show",
-                "Открыть панель мониторинга (Пульс)",
+                "Открыть панель Заставы",
                 true,
                 None::<&str>,
             )?;
+            let killswitch_i = IconMenuItem::with_id(
+                app,
+                "toggle_killswitch_tray",
+                "СТОП СЕТИ — Заморозить трафик ИИ",
+                true,
+                Image::from_bytes(TRAY_ICON_RED).ok(),
+                None::<&str>,
+            )?;
+            app.manage(TrayKillswitchMenuItem(killswitch_i.clone()));
+            let sep2 = PredefinedMenuItem::separator(app)?;
+
+            // Submenu 1: Профили Claude (Мульти-аккаунт)
+            let profiles_res = auditor::profile_switcher::list_claude_profiles(None).ok();
+            let mut profile_menu_items = Vec::new();
+            if let Some(resp) = &profiles_res {
+                for p in resp.profiles.iter().take(10) {
+                    let mark = if p.is_active { "● Активен: " } else { "○ " };
+                    let email_or_label = p.bound_ip.as_deref().or(p.bound_country.as_deref()).unwrap_or("Основной");
+                    let proxy_badge = if p.bound_upstream_key.is_some() { " [Прокси]" } else { "" };
+                    let label = format!("{mark}{} ({email_or_label}){proxy_badge}", p.name);
+                    if let Ok(item) = MenuItem::with_id(app, format!("switch_profile:{}", p.id), label, true, None::<&str>) {
+                        profile_menu_items.push(item);
+                    }
+                }
+            }
+            let manage_profiles_i = MenuItem::with_id(
+                app,
+                "manage_profiles_tray",
+                "Управление профилями и бэкапом...",
+                true,
+                None::<&str>,
+            )?;
+            let sep_profiles = PredefinedMenuItem::separator(app)?;
+            let mut sub1_items: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> = Vec::new();
+            for item in &profile_menu_items {
+                sub1_items.push(item);
+            }
+            if !profile_menu_items.is_empty() {
+                sub1_items.push(&sep_profiles);
+            }
+            sub1_items.push(&manage_profiles_i);
+            let submenu_profiles = Submenu::with_items(app, "Профили Claude (Мульти-аккаунт)", true, &sub1_items)?;
+
+            // Submenu 2: Контур защиты и сеть
             let toggle_sysproxy_i = MenuItem::with_id(
                 app,
                 "toggle_sysproxy_tray",
-                "🌐 Переключить защиту браузеров и Claude Desktop",
+                "Защита браузеров и Claude Desktop (PAC)",
                 true,
                 None::<&str>,
             )?;
             let toggle_cli_i = MenuItem::with_id(
                 app,
                 "toggle_cli_tray",
-                "💻 Переключить защиту терминала и Cursor / VS Code",
+                "Защита терминала, VS Code и Cursor",
                 true,
                 None::<&str>,
             )?;
             let sync_tz_i = MenuItem::with_id(
                 app,
                 "sync_tz_tray",
-                "🕒 Синхронизировать часовой пояс для ИИ",
-                true,
-                None::<&str>,
-            )?;
-            let backup_claude_i = MenuItem::with_id(
-                app,
-                "backup_claude_tray",
-                "📦 Быстрый бэкап Claude на Рабочий стол",
-                true,
-                None::<&str>,
-            )?;
-            let crash_test_i = MenuItem::with_id(
-                app,
-                "crash_test_tray",
-                "🧪 Боевой краш-тест обрыва VPN",
+                "Синхронизировать часовой пояс под VPN",
                 true,
                 None::<&str>,
             )?;
             let pin_i = MenuItem::with_id(
                 app,
                 "pin_ip",
-                "📌 Закрепить текущий IP как личный VPS",
+                "Закрепить текущий IP как эталонный",
+                true,
+                None::<&str>,
+            )?;
+            let force_clean_proxy_i = MenuItem::with_id(
+                app,
+                "force_clean_proxy_tray",
+                "Сбросить системные прокси и хвосты в ОС",
+                true,
+                None::<&str>,
+            )?;
+            let submenu_protection = Submenu::with_items(
+                app,
+                "Контур защиты и сеть",
+                true,
+                &[
+                    &toggle_sysproxy_i,
+                    &toggle_cli_i,
+                    &sync_tz_i,
+                    &pin_i,
+                    &force_clean_proxy_i,
+                ],
+            )?;
+
+            // Submenu 3: Режим при обрыве VPN
+            let behavior_ask_popup_i = MenuItem::with_id(
+                app,
+                "behavior_ask_popup",
+                "Уведомление в правом верхнем углу",
+                true,
+                None::<&str>,
+            )?;
+            let behavior_auto_lock_i = MenuItem::with_id(
+                app,
+                "behavior_auto_lock",
+                "Тихая авто-пауза (без всплывающих окон)",
+                true,
+                None::<&str>,
+            )?;
+            let behavior_auto_allow_i = MenuItem::with_id(
+                app,
+                "behavior_auto_allow",
+                "Авто-пропуск безопасных стран (NL / DE / US)",
+                true,
+                None::<&str>,
+            )?;
+            let submenu_behavior = Submenu::with_items(
+                app,
+                "Режим при обрыве VPN",
+                true,
+                &[
+                    &behavior_ask_popup_i,
+                    &behavior_auto_lock_i,
+                    &behavior_auto_allow_i,
+                ],
+            )?;
+
+            // Submenu 4: Диагностика и бэкап
+            let crash_test_i = MenuItem::with_id(
+                app,
+                "crash_test_tray",
+                "Запустить краш-тест обрыва VPN",
+                true,
+                None::<&str>,
+            )?;
+            let backup_claude_i = MenuItem::with_id(
+                app,
+                "backup_claude_tray",
+                "Экспорт и бэкап данных Claude на Рабочий стол",
                 true,
                 None::<&str>,
             )?;
             let rescan_i = MenuItem::with_id(
                 app,
                 "rescan",
-                "↻ Перепроверить соединение (2ip / DNSBL)",
+                "Перепроверить соединение и чистоту IP",
                 true,
                 None::<&str>,
             )?;
+            let submenu_tools = Submenu::with_items(
+                app,
+                "Диагностика и бэкап",
+                true,
+                &[
+                    &crash_test_i,
+                    &backup_claude_i,
+                    &rescan_i,
+                ],
+            )?;
+
+            // Submenu 5: Справка и обновления
             let guide_i = MenuItem::with_id(
                 app,
                 "open_guide",
-                "⚡ Гайд: Свой чистый VPN за 15 минут",
+                "Инструкция: Свой VPN за 15 минут",
                 true,
                 None::<&str>,
             )?;
             let support_i = MenuItem::with_id(
                 app,
                 "support",
-                "💬 Поддержка в Telegram: @nomadnocode",
+                "Поддержка в Telegram (@nomadnocode)",
                 true,
                 None::<&str>,
             )?;
             let update_i = MenuItem::with_id(
                 app,
                 "check_updates",
-                "🔄 Проверить обновления (GitHub)",
+                "Проверить обновления",
                 true,
                 None::<&str>,
             )?;
-            let sep2 = PredefinedMenuItem::separator(app)?;
+            let submenu_guides = Submenu::with_items(
+                app,
+                "Справка и обновления",
+                true,
+                &[
+                    &guide_i,
+                    &support_i,
+                    &update_i,
+                ],
+            )?;
+
+            let sep3 = PredefinedMenuItem::separator(app)?;
             let quit_i = MenuItem::with_id(
                 app,
                 "quit",
-                "Выйти и отключить сетевой контроль",
+                "Выйти и отключить защиту",
                 true,
                 None::<&str>,
             )?;
@@ -1029,27 +1325,25 @@ pub fn run() {
                     &stats_i,
                     &sep1,
                     &show_i,
-                    &toggle_sysproxy_i,
-                    &toggle_cli_i,
-                    &sync_tz_i,
-                    &backup_claude_i,
-                    &crash_test_i,
-                    &pin_i,
-                    &rescan_i,
-                    &guide_i,
-                    &support_i,
-                    &update_i,
+                    &killswitch_i,
                     &sep2,
+                    &submenu_profiles,
+                    &submenu_protection,
+                    &submenu_behavior,
+                    &submenu_tools,
+                    &submenu_guides,
+                    &sep3,
                     &quit_i,
                 ],
             )?;
 
+            let killswitch_i_for_event = killswitch_i.clone();
             let mut tray_builder = TrayIconBuilder::with_id(MAIN_TRAY_ID)
                 .menu(&menu)
                 .title(" ···")
                 .tooltip("Застава — Сетевой шлюз для работы с ИИ")
                 .show_menu_on_left_click(false)
-                .on_menu_event(|app, event| match event.id.as_ref() {
+                .on_menu_event(move |app, event| match event.id.as_ref() {
                     "quit" => {
                         sysproxy::disable_all_sysproxy();
                         app.exit(0);
@@ -1059,6 +1353,59 @@ pub fn run() {
                             let _ = win.show();
                             let _ = win.set_focus();
                         }
+                    }
+                    "toggle_killswitch_tray" => {
+                        let app_handle = app.clone();
+                        let killswitch_item = killswitch_i_for_event.clone();
+                        tauri::async_runtime::spawn(async move {
+                            if let (Some(guard), Some(st)) = (
+                                app_handle.try_state::<std::sync::Arc<proxy::NetworkGuard>>(),
+                                app_handle.try_state::<state::AppState>(),
+                            ) {
+                                let target_freeze = !guard.is_gate_blocked();
+                                let now_frozen = guard.set_manual_killswitch(target_freeze, &st).await;
+                                let (new_text, new_icon) = if now_frozen {
+                                    ("Снять СТОП СЕТИ — Возобновить работу ИИ", TRAY_ICON_GREEN)
+                                } else {
+                                    ("СТОП СЕТИ — Заморозить трафик ИИ", TRAY_ICON_RED)
+                                };
+                                let _ = killswitch_item.set_text(new_text);
+                                if let Ok(img) = Image::from_bytes(new_icon) {
+                                    let _ = killswitch_item.set_icon(Some(img));
+                                }
+                                let _ = app_handle.emit("tray://killswitch-toggled", now_frozen);
+                            }
+                        });
+                    }
+                    "manage_profiles_tray" => {
+                        if let Some(win) = app.get_webview_window("main") {
+                            let _ = win.show();
+                            let _ = win.set_focus();
+                        }
+                        let _ = app.emit("tray://open-profiles", ());
+                    }
+                    id if id.starts_with("switch_profile:") => {
+                        let profile_id = id.trim_start_matches("switch_profile:").to_string();
+                        let app_handle = app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            match auditor::profile_switcher::switch_claude_profile(&profile_id) {
+                                Ok(res) => {
+                                    if let Some(st) = app_handle.try_state::<state::AppState>() {
+                                        let _ = st.set_pinned_ip(res.pinned_ip_updated.clone()).await;
+                                        if let Some(ref key) = res.bound_upstream_key_updated {
+                                            if let Ok(parsed) = proxy::upstream::parse_upstream_key(key) {
+                                                let _ = st.set_upstream_proxy(Some(parsed)).await;
+                                            }
+                                        }
+                                    }
+                                    update_tray_status(&app_handle, "green", Some(&format!("Профиль: {}", res.active_profile.name)));
+                                    let _ = app_handle.emit("tray://profile-switched", &res);
+                                }
+                                Err(e) => {
+                                    eprintln!("Failed to switch profile {profile_id}: {e}");
+                                }
+                            }
+                        });
                     }
                     "toggle_sysproxy_tray" => {
                         let active = sysproxy::is_sysproxy_active();
@@ -1089,13 +1436,53 @@ pub fn run() {
                         }
                         let _ = app.emit("tray://sync-timezone", ());
                     }
-                    "backup_claude_tray" => {
-                        let app_clone = app.clone();
+                    "pin_ip" => {
+                        let _ = app.emit("tray://pin-current-ip", ());
+                        if let Some(win) = app.get_webview_window("main") {
+                            let _ = win.show();
+                            let _ = win.set_focus();
+                        }
+                    }
+                    "force_clean_proxy_tray" => {
+                        let app_handle = app.clone();
                         tauri::async_runtime::spawn(async move {
-                            let res = tokio::task::spawn_blocking(auditor::claude_exporter::export_claude_local_data).await;
-                            if let Ok(Ok(export_res)) = res {
-                                let _ = app_clone.emit("claude://backup-finished", &export_res);
+                            let _ = sysproxy::force_clean_all_os_proxy_traces();
+                            if let Some(st) = app_handle.try_state::<state::AppState>() {
+                                let _ = st.set_sysproxy_enabled(false).await;
+                                let _ = st.set_cli_protection_enabled(false).await;
                             }
+                            update_tray_status(&app_handle, "green", Some("Прокси и хвосты в ОС очищены"));
+                            let _ = app_handle.emit("tray://state-changed", ());
+                        });
+                    }
+                    "behavior_ask_popup" => {
+                        let app_handle = app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            if let Some(st) = app_handle.try_state::<state::AppState>() {
+                                let _ = st.set_interception_behavior(state::InterceptionBehavior::AskPopup).await;
+                            }
+                            update_tray_status(&app_handle, "green", Some("Режим: Уведомление в правом верхнем углу"));
+                            let _ = app_handle.emit("tray://state-changed", ());
+                        });
+                    }
+                    "behavior_auto_lock" => {
+                        let app_handle = app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            if let Some(st) = app_handle.try_state::<state::AppState>() {
+                                let _ = st.set_interception_behavior(state::InterceptionBehavior::AutoLockSilent).await;
+                            }
+                            update_tray_status(&app_handle, "red", Some("Режим: Тихая авто-пауза"));
+                            let _ = app_handle.emit("tray://state-changed", ());
+                        });
+                    }
+                    "behavior_auto_allow" => {
+                        let app_handle = app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            if let Some(st) = app_handle.try_state::<state::AppState>() {
+                                let _ = st.set_interception_behavior(state::InterceptionBehavior::AutoAllowTrusted).await;
+                            }
+                            update_tray_status(&app_handle, "green", Some("Режим: Авто-пропуск (NL/DE/US)"));
+                            let _ = app_handle.emit("tray://state-changed", ());
                         });
                     }
                     "crash_test_tray" => {
@@ -1105,15 +1492,17 @@ pub fn run() {
                         }
                         let _ = app.emit("tray://open-crash-test", ());
                     }
+                    "backup_claude_tray" => {
+                        let app_clone = app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            let res = tokio::task::spawn_blocking(auditor::claude_exporter::export_claude_local_data).await;
+                            if let Ok(Ok(export_res)) = res {
+                                let _ = app_clone.emit("claude://backup-finished", &export_res);
+                            }
+                        });
+                    }
                     "rescan" => {
                         let _ = app.emit("tray://rescan", ());
-                        if let Some(win) = app.get_webview_window("main") {
-                            let _ = win.show();
-                            let _ = win.set_focus();
-                        }
-                    }
-                    "pin_ip" => {
-                        let _ = app.emit("tray://pin-current-ip", ());
                         if let Some(win) = app.get_webview_window("main") {
                             let _ = win.show();
                             let _ = win.set_focus();
@@ -1253,6 +1642,14 @@ pub fn run() {
             switch_claude_profile_cmd,
             delete_claude_profile_cmd,
             bind_ip_to_claude_profile_cmd,
+            bind_upstream_to_claude_profile_cmd,
+            get_interception_behavior_cmd,
+            set_interception_behavior_cmd,
+            get_popup_position_cmd,
+            set_popup_position_cmd,
+            get_custom_ai_domains_cmd,
+            add_custom_ai_domain_cmd,
+            remove_custom_ai_domain_cmd,
             run_vpn_crash_test_step,
             trigger_crash_test_drop,
             reset_crash_test_drop,
@@ -1260,7 +1657,10 @@ pub fn run() {
             toggle_upstream_proxy,
             clear_upstream_proxy,
             set_warmup_timer,
-            get_gateway_stats
+            get_gateway_stats,
+            force_clean_os_proxy_cmd,
+            toggle_network_killswitch_cmd,
+            get_network_killswitch_status_cmd
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

@@ -138,22 +138,44 @@ pub fn evaluate_locale_env_hygiene(synced_ai_tz: Option<&str>) -> CheckResult {
 pub fn check_os_location_services() -> CheckResult {
     #[cfg(target_os = "windows")]
     {
-        if let Ok(output) = crate::sysproxy::silent_command("reg")
+        // 1. Check machine-wide policy first in HKLM.
+        // If Deny, location services are globally disabled for the entire machine.
+        if let Ok(hklm_output) = crate::sysproxy::silent_command("reg")
             .args([
                 "query",
-                r"HKCU\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\location",
+                r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\location",
                 "/v",
                 "Value",
             ])
             .output()
         {
-            let text = String::from_utf8_lossy(&output.stdout);
-            if text.contains("Allow") {
-                return CheckResult::warning(
-                    "OS_LOCATION_ENABLED",
-                    "Службы геолокации Windows активны. Отключите их в настройках конфиденциальности ОС.",
-                    Some(GUIDE_OS_PRIVACY.to_string()),
+            let hklm_text = String::from_utf8_lossy(&hklm_output.stdout);
+            if hklm_text.contains("Deny") {
+                return CheckResult::ok(
+                    "OS_LOCATION_SAFE",
+                    "Геолокация Windows отключена. Утечек по Wi-Fi (BSSID) нет.",
                 );
+            }
+            if hklm_text.contains("Allow") {
+                // 2. Only if HKLM is Allow AND HKCU is Allow, return the warning
+                if let Ok(hkcu_output) = crate::sysproxy::silent_command("reg")
+                    .args([
+                        "query",
+                        r"HKCU\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\location",
+                        "/v",
+                        "Value",
+                    ])
+                    .output()
+                {
+                    let hkcu_text = String::from_utf8_lossy(&hkcu_output.stdout);
+                    if hkcu_text.contains("Allow") {
+                        return CheckResult::warning(
+                            "OS_LOCATION_ENABLED",
+                            "Службы геолокации Windows активны. Отключите их в настройках конфиденциальности ОС.",
+                            Some(GUIDE_OS_PRIVACY.to_string()),
+                        );
+                    }
+                }
             }
         }
     }
@@ -165,7 +187,7 @@ pub fn check_os_location_services() -> CheckResult {
 
     CheckResult::ok(
         "OS_LOCATION_SAFE",
-        "Службы геолокации ОС не передают локальные Wi-Fi BSSID.",
+        "Геолокация по Wi-Fi безопасна: MAC-адреса роутеров (BSSID) не передаются.",
     )
 }
 
@@ -197,5 +219,12 @@ mod tests {
         let res_synced = evaluate_locale_env_hygiene(Some("Europe/London"));
         assert_eq!(res_synced.status, crate::auditor::geo_matrix::CheckStatus::Ok);
         assert_eq!(res_synced.code, "LOCALE_HYGIENE_CLEAN");
+    }
+
+    #[test]
+    fn test_os_location_services_check() {
+        let res = check_os_location_services();
+        assert!(res.code == "OS_LOCATION_SAFE" || res.code == "OS_LOCATION_ENABLED");
+        assert!(res.message.contains("Wi-Fi"));
     }
 }

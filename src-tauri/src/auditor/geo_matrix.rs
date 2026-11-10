@@ -58,70 +58,138 @@ impl ProviderId {
             return None;
         }
 
-        // 1. Anthropic / Claude
-        if host == "canary-test.anthropic.zastava.local"
-            || host == "claude.ai"
-            || host.ends_with(".claude.ai")
-            || host == "claude.com"
-            || host.ends_with(".claude.com")
-            || host == "anthropic.com"
-            || host.ends_with(".anthropic.com")
-            || host == "claudeusercontent.com"
-            || host.ends_with(".claudeusercontent.com")
-        {
-            return Some(ProviderId::Anthropic);
+        let matches_domain = |h: &str, d: &str| -> bool {
+            h == d || (h.len() > d.len() && h.ends_with(d) && h.as_bytes()[h.len() - d.len() - 1] == b'.')
+        };
+
+        // 1. Anthropic / Claude / Cursor / OpenRouter / Perplexity
+        const ANTHROPIC_DOMAINS: &[&str] = &[
+            "canary-test.anthropic.zastava.local",
+            "claude.ai",
+            "claude.com",
+            "anthropic.com",
+            "claudeusercontent.com",
+            "console.anthropic.com",
+            "statsig.anthropic.com",
+            "cursor.sh",
+            "api2.cursor.sh",
+            "api3.cursor.sh",
+            "cursor.com",
+            "cursor-cdn.com",
+            "openrouter.ai",
+            "poe.com",
+            "perplexity.ai",
+            "pplx.ai",
+        ];
+        for d in ANTHROPIC_DOMAINS {
+            if matches_domain(&host, d) {
+                return Some(ProviderId::Anthropic);
+            }
         }
 
-        // 2. OpenAI / ChatGPT
-        if host == "chatgpt.com"
-            || host.ends_with(".chatgpt.com")
-            || host == "openai.com"
-            || host.ends_with(".openai.com")
-            || host == "oaistatic.com"
-            || host.ends_with(".oaistatic.com")
-            || host == "oaiusercontent.com"
-            || host.ends_with(".oaiusercontent.com")
-        {
-            return Some(ProviderId::Openai);
+        // 2. OpenAI / ChatGPT / Microsoft Copilot / DeepSeek / Mistral / Grok
+        const OPENAI_DOMAINS: &[&str] = &[
+            "chatgpt.com",
+            "openai.com",
+            "oaistatic.com",
+            "oaiusercontent.com",
+            "auth0.openai.com",
+            "platform.openai.com",
+            "chat.openai.com",
+            "copilot.microsoft.com",
+            "sydney.bing.com",
+            "edgeservices.bing.com",
+            "copilot.cloud.microsoft",
+            "officecopilot.microsoft.com",
+            "githubcopilot.com",
+            "api.githubcopilot.com",
+            "copilot-proxy.githubusercontent.com",
+            "default.exp-tas.com",
+            "codeium.com",
+            "windsurf.com",
+            "codeiumdata.com",
+            "supermaven.com",
+            "deepseek.com",
+            "chat.deepseek.com",
+            "api.deepseek.com",
+            "grok.com",
+            "x.ai",
+            "api.x.ai",
+            "mistral.ai",
+            "chat.mistral.ai",
+        ];
+        for d in OPENAI_DOMAINS {
+            if matches_domain(&host, d) {
+                return Some(ProviderId::Openai);
+            }
         }
 
-        // 3. Google Gemini / AI Studio / Vertex AI / Cloud AI Companion (Antigravity, Orca, Cloud Code)
-        if host == "gemini.google.com"
-            || host.ends_with(".gemini.google.com")
-            || host == "aistudio.google.com"
-            || host.ends_with(".aistudio.google.com")
-            || host == "makersuite.google.com"
-            || host.ends_with(".makersuite.google.com")
-            || host == "generativelanguage.googleapis.com"
-            || host.ends_with(".generativelanguage.googleapis.com")
-            || host == "aiplatform.googleapis.com"
-            || host.ends_with(".aiplatform.googleapis.com")
-            || host == "cloudaicompanion.googleapis.com"
-            || host.ends_with(".cloudaicompanion.googleapis.com")
-            || host.ends_with(".clients6.google.com")
-            || host == "daily-cloudcode-pa.googleapis.com"
-            || host == "cloudcode-pa.googleapis.com"
-            || host.ends_with(".cloudcode-pa.googleapis.com")
-            || host == "daily-cloudcode-pa.sandbox.googleapis.com"
-            || host == "autopush-cloudcode-pa.sandbox.googleapis.com"
-            || host == "preprod-daily-cloudcode-pa.sandbox.googleapis.com"
-            || host.ends_with(".cloudcode-pa.sandbox.googleapis.com")
-            || host == "aicode.googleapis.com"
-            || host.ends_with(".aicode.googleapis.com")
-            || host == "autopush-aicode.sandbox.googleapis.com"
-            || host == "preprod-aicode.sandbox.googleapis.com"
-            || host.ends_with(".aicode.sandbox.googleapis.com")
-            || host == "alkalimakersuiteapplets.pa.googleapis.com"
-            || host.ends_with(".alkalimakersuiteapplets.pa.googleapis.com")
-            || host == "antigravity.google"
-            || host.ends_with(".antigravity.google")
-            || host == "antigravity.google.com"
-            || host.ends_with(".antigravity.google.com")
-            || host == "share.gemini.google"
-            || host == "gemini.google"
-            || host.ends_with(".gemini.google")
-        {
-            return Some(ProviderId::Gemini);
+        // 3. Google Gemini / AI Studio / Vertex AI / Cloud AI Companion (Antigravity, Orca, Cloud Code) / NotebookLM / Labs
+        const GEMINI_DOMAINS: &[&str] = &[
+            "gemini.google.com",
+            "aistudio.google.com",
+            "makersuite.google.com",
+            "generativelanguage.googleapis.com",
+            "aiplatform.googleapis.com",
+            "cloudaicompanion.googleapis.com",
+            "clients6.google.com",
+            "alkalimakersuite-pa.clients6.google.com",
+            "daily-cloudcode-pa.googleapis.com",
+            "cloudcode-pa.googleapis.com",
+            "daily-cloudcode-pa.sandbox.googleapis.com",
+            "autopush-cloudcode-pa.sandbox.googleapis.com",
+            "preprod-daily-cloudcode-pa.sandbox.googleapis.com",
+            "aicode.googleapis.com",
+            "autopush-aicode.sandbox.googleapis.com",
+            "preprod-aicode.sandbox.googleapis.com",
+            "alkalimakersuiteapplets.pa.googleapis.com",
+            "antigravity.google",
+            "antigravity.google.com",
+            "share.gemini.google",
+            "gemini.google",
+            "notebooklm.google",
+            "notebooklm.google.com",
+            "idx.google.com",
+            "opal.google.com",
+            "labs.google",
+        ];
+        for d in GEMINI_DOMAINS {
+            if matches_domain(&host, d) {
+                return Some(ProviderId::Gemini);
+            }
+        }
+
+        None
+    }
+
+    /// Matches host against known providers AND user-added custom domains.
+    /// Falls back to Some(ProviderId::Anthropic) if host matches any user-added custom domain.
+    pub fn from_host_with_custom(raw_host: &str, custom_domains: &[String]) -> Option<Self> {
+        if let Some(p) = Self::from_host(raw_host) {
+            return Some(p);
+        }
+
+        let without_port = if let Some(bracketed) = raw_host.strip_prefix('[') {
+            bracketed.split(']').next().unwrap_or(raw_host)
+        } else {
+            raw_host.split(':').next().unwrap_or(raw_host)
+        };
+
+        let host = without_port
+            .trim()
+            .trim_matches(|c| c == '[' || c == ']')
+            .trim_end_matches('.')
+            .to_lowercase();
+
+        if host.is_empty() {
+            return None;
+        }
+
+        for d in custom_domains {
+            let clean = d.trim().trim_start_matches("*.").trim_start_matches('.').to_lowercase();
+            if !clean.is_empty() && (host == clean || host.ends_with(&format!(".{clean}"))) {
+                return Some(ProviderId::Anthropic);
+            }
         }
 
         None
@@ -374,5 +442,40 @@ mod tests {
         assert_eq!(ProviderId::from_host("antigravity.google"), Some(ProviderId::Gemini));
         assert_eq!(ProviderId::from_host("antigravity.google.com"), Some(ProviderId::Gemini));
         assert_eq!(ProviderId::from_host("share.gemini.google"), Some(ProviderId::Gemini));
+        assert_eq!(ProviderId::from_host("notebooklm.google"), Some(ProviderId::Gemini));
+        assert_eq!(ProviderId::from_host("notebooklm.google.com"), Some(ProviderId::Gemini));
+        assert_eq!(ProviderId::from_host("idx.google.com"), Some(ProviderId::Gemini));
+    }
+
+    #[test]
+    fn test_extended_domains_and_custom_domains_matching() {
+        // Anthropic / Cursor / Perplexity
+        assert_eq!(ProviderId::from_host("cursor.sh"), Some(ProviderId::Anthropic));
+        assert_eq!(ProviderId::from_host("api2.cursor.sh:443"), Some(ProviderId::Anthropic));
+        assert_eq!(ProviderId::from_host("perplexity.ai"), Some(ProviderId::Anthropic));
+        assert_eq!(ProviderId::from_host("openrouter.ai"), Some(ProviderId::Anthropic));
+
+        // OpenAI / Copilot / DeepSeek / Mistral
+        assert_eq!(ProviderId::from_host("copilot.microsoft.com:443"), Some(ProviderId::Openai));
+        assert_eq!(ProviderId::from_host("githubcopilot.com"), Some(ProviderId::Openai));
+        assert_eq!(ProviderId::from_host("api.githubcopilot.com"), Some(ProviderId::Openai));
+        assert_eq!(ProviderId::from_host("deepseek.com"), Some(ProviderId::Openai));
+        assert_eq!(ProviderId::from_host("api.deepseek.com"), Some(ProviderId::Openai));
+        assert_eq!(ProviderId::from_host("mistral.ai"), Some(ProviderId::Openai));
+
+        // Custom domain matching
+        let custom = vec!["internal-ai.corp".to_string(), "custom-agent.dev".to_string()];
+        assert_eq!(
+            ProviderId::from_host_with_custom("internal-ai.corp:8443", &custom),
+            Some(ProviderId::Anthropic)
+        );
+        assert_eq!(
+            ProviderId::from_host_with_custom("api.custom-agent.dev", &custom),
+            Some(ProviderId::Anthropic)
+        );
+        assert_eq!(
+            ProviderId::from_host_with_custom("unknown-service.com", &custom),
+            None
+        );
     }
 }

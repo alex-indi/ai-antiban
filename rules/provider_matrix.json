@@ -42,7 +42,18 @@
         "claude.ai",
         "claude.com",
         "anthropic.com",
-        "claudeusercontent.com"
+        "claudeusercontent.com",
+        "console.anthropic.com",
+        "statsig.anthropic.com",
+        "cursor.sh",
+        "api2.cursor.sh",
+        "api3.cursor.sh",
+        "cursor.com",
+        "cursor-cdn.com",
+        "openrouter.ai",
+        "poe.com",
+        "perplexity.ai",
+        "pplx.ai"
       ],
       "blocked_countries": [
         "RU", "BY", "CN", "HK", "MO", "IR", "KP", "SY", "CU"
@@ -64,7 +75,31 @@
         "chatgpt.com",
         "openai.com",
         "oaistatic.com",
-        "oaiusercontent.com"
+        "oaiusercontent.com",
+        "auth0.openai.com",
+        "platform.openai.com",
+        "chat.openai.com",
+        "copilot.microsoft.com",
+        "sydney.bing.com",
+        "edgeservices.bing.com",
+        "copilot.cloud.microsoft",
+        "officecopilot.microsoft.com",
+        "githubcopilot.com",
+        "api.githubcopilot.com",
+        "copilot-proxy.githubusercontent.com",
+        "default.exp-tas.com",
+        "codeium.com",
+        "windsurf.com",
+        "codeiumdata.com",
+        "supermaven.com",
+        "deepseek.com",
+        "chat.deepseek.com",
+        "api.deepseek.com",
+        "grok.com",
+        "x.ai",
+        "api.x.ai",
+        "mistral.ai",
+        "chat.mistral.ai"
       ],
       "blocked_countries": [
         "RU", "BY", "CN", "HK", "MO", "IR", "KP", "SY", "CU"
@@ -98,7 +133,12 @@
         "alkalimakersuiteapplets.pa.googleapis.com",
         "antigravity.google",
         "antigravity.google.com",
-        "share.gemini.google"
+        "share.gemini.google",
+        "notebooklm.google",
+        "notebooklm.google.com",
+        "idx.google.com",
+        "opal.google.com",
+        "labs.google"
       ],
       "blocked_countries": [
         "RU", "BY", "CN", "HK", "MO", "IR", "KP", "SY", "CU", "TR"

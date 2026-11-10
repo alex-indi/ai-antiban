@@ -96,7 +96,8 @@ pub fn spawn_signal_cleanup_watcher() {
     });
 }
 
-/// Disables systemic PAC proxy on all network services across macOS and Windows.
+/// Disables systemic PAC proxy on all network services across macOS and Windows,
+/// and thoroughly cleans up CLI, IDE, and OS environment proxy traces.
 pub fn disable_all_sysproxy() {
     #[cfg(target_os = "macos")]
     {
@@ -121,11 +122,40 @@ pub fn disable_all_sysproxy() {
                 "/f",
             ])
             .output();
+        let _ = silent_command("reg")
+            .args([
+                "add",
+                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings",
+                "/v",
+                "ProxyEnable",
+                "/t",
+                "REG_DWORD",
+                "/d",
+                "0",
+                "/f",
+            ])
+            .output();
         notify_windows_inet_refresh();
     }
 
-    if CLI_PROTECTION_ACTIVE.swap(false, Ordering::SeqCst) {
-        disable_cli_and_ide_runtime_settings();
+    // Always clean up CLI, shell, PowerShell, IDE settings, and OS environment
+    disable_cli_protection();
+
+    #[cfg(target_os = "windows")]
+    {
+        for var_name in [
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "NO_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+            "no_proxy",
+        ] {
+            let _ = delete_windows_user_env_var(var_name);
+        }
+        broadcast_windows_env_change();
     }
 
     SYS_PROXY_ACTIVE.store(false, Ordering::SeqCst);
@@ -174,6 +204,20 @@ pub fn enable_sysproxy(pac_url: &str) -> Result<SysproxyStatus, String> {
                 "REG_SZ",
                 "/d",
                 pac_url,
+                "/f",
+            ])
+            .output();
+
+        let _ = silent_command("reg")
+            .args([
+                "add",
+                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings",
+                "/v",
+                "ProxyEnable",
+                "/t",
+                "REG_DWORD",
+                "/d",
+                "0",
                 "/f",
             ])
             .output();
@@ -370,6 +414,23 @@ pub fn build_shell_rc_guard_block(proxy_url: &str, port: u16) -> String {
     build_shell_rc_guard_block_with_tz(proxy_url, port, None)
 }
 
+/// Validates and sanitizes a timezone identifier string.
+/// Returns Some(sanitized) if valid (non-empty, len <= 64, ASCII alphanumeric + '/' | '_' | '-' | '+').
+pub fn sanitize_timezone(tz: &str) -> Option<String> {
+    let trimmed = tz.trim();
+    if trimmed.is_empty() || trimmed.len() > 64 {
+        return None;
+    }
+    if trimmed
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '-' | '+'))
+    {
+        Some(trimmed.to_string())
+    } else {
+        None
+    }
+}
+
 /// Builds the shell RC block including optional timezone and clean UTF-8 locale sync.
 pub fn build_shell_rc_guard_block_with_tz(
     proxy_url: &str,
@@ -377,13 +438,10 @@ pub fn build_shell_rc_guard_block_with_tz(
     tz: Option<&str>,
 ) -> String {
     let mut tz_exports = String::new();
-    if let Some(timezone) = tz {
-        let trimmed_tz = timezone.trim();
-        if !trimmed_tz.is_empty() {
-            tz_exports = format!(
-                "\n  export TZ=\"{trimmed_tz}\"\n  export LANG=\"en_US.UTF-8\"\n  export LC_TIME=\"en_US.UTF-8\"\n  export LC_ALL=\"en_US.UTF-8\""
-            );
-        }
+    if let Some(timezone) = tz.and_then(sanitize_timezone) {
+        tz_exports = format!(
+            "\n  export TZ=\"{timezone}\"\n  export LANG=\"en_US.UTF-8\"\n  export LC_TIME=\"en_US.UTF-8\"\n  export LC_ALL=\"en_US.UTF-8\""
+        );
     }
     format!(
         "{start}\nif command -v nc >/dev/null 2>&1 && nc -z 127.0.0.1 {port} >/dev/null 2>&1; then\n  export HTTP_PROXY=\"{url}\"\n  export HTTPS_PROXY=\"{url}\"\n  export ALL_PROXY=\"{url}\"\n  export http_proxy=\"{url}\"\n  export https_proxy=\"{url}\"\n  export all_proxy=\"{url}\"\n  export NO_PROXY=\"{no_proxy}\"\n  export no_proxy=\"{no_proxy}\"{tz_exports}\nfi\n{end}",
@@ -397,24 +455,27 @@ pub fn build_shell_rc_guard_block_with_tz(
 }
 
 /// Builds the PowerShell profile block with proxy settings and optional timezone/locale.
+/// Wraps proxy assignments inside a zero-latency kernel TCP listener check so PowerShell never hangs
+/// or fails when Zastava is closed or uninstalled, and actively removes stale proxy variables.
 pub fn build_powershell_guard_block_with_tz(
     proxy_url: &str,
     tz: Option<&str>,
 ) -> String {
-    let mut block = format!(
-        "{start}\n$env:HTTP_PROXY = \"{url}\"\n$env:HTTPS_PROXY = \"{url}\"\n$env:ALL_PROXY = \"{url}\"\n$env:http_proxy = \"{url}\"\n$env:https_proxy = \"{url}\"\n$env:all_proxy = \"{url}\"\n$env:NO_PROXY = \"{no_proxy}\"\n$env:no_proxy = \"{no_proxy}\"\n$env:LANG = \"en_US.UTF-8\"\n$env:LC_TIME = \"en_US.UTF-8\"\n$env:LC_ALL = \"en_US.UTF-8\"",
-        start = ZASTAVA_RC_START,
-        url = proxy_url,
-        no_proxy = NO_PROXY_VALUE,
-    );
-    if let Some(timezone) = tz {
-        let trimmed = timezone.trim();
-        if !trimmed.is_empty() {
-            block.push_str(&format!("\n$env:TZ = \"{trimmed}\""));
-        }
+    let (url, port) = normalize_proxy_url_and_port(proxy_url);
+    let mut tz_assignment = String::new();
+    if let Some(timezone) = tz.and_then(sanitize_timezone) {
+        tz_assignment = format!("\n  $env:TZ = \"{timezone}\"");
     }
-    block.push_str(&format!("\n{end}", end = ZASTAVA_RC_END));
-    block
+
+    format!(
+        "{start}\n$__zastavaUp = $false\ntry {{\n  $__zastavaUp = [bool]([System.Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners() | Where-Object {{ $_.Port -eq {port} }})\n}} catch {{}}\nif ($__zastavaUp) {{\n  $env:HTTP_PROXY = \"{url}\"\n  $env:HTTPS_PROXY = \"{url}\"\n  $env:ALL_PROXY = \"{url}\"\n  $env:http_proxy = \"{url}\"\n  $env:https_proxy = \"{url}\"\n  $env:all_proxy = \"{url}\"\n  $env:NO_PROXY = \"{no_proxy}\"\n  $env:no_proxy = \"{no_proxy}\"\n  $env:LANG = \"en_US.UTF-8\"\n  $env:LC_TIME = \"en_US.UTF-8\"\n  $env:LC_ALL = \"en_US.UTF-8\"{tz_assignment}\n}} else {{\n  Remove-Item Env:HTTP_PROXY,Env:HTTPS_PROXY,Env:ALL_PROXY,Env:http_proxy,Env:https_proxy,Env:all_proxy -ErrorAction SilentlyContinue\n}}\n{end}",
+        start = ZASTAVA_RC_START,
+        port = port,
+        url = url,
+        no_proxy = NO_PROXY_VALUE,
+        tz_assignment = tz_assignment,
+        end = ZASTAVA_RC_END,
+    )
 }
 
 /// Idempotently inserts or updates the Zastava CLI guard block inside a PowerShell profile file content.
@@ -1037,30 +1098,31 @@ pub fn enable_cli_and_ide_protection_with_tz(
         // 3b. Windows User Environment & PowerShell Profiles
         #[cfg(target_os = "windows")]
         {
-            let vars = [
-                ("HTTP_PROXY", proxy_url.as_str()),
-                ("HTTPS_PROXY", proxy_url.as_str()),
-                ("ALL_PROXY", proxy_url.as_str()),
-                ("NO_PROXY", NO_PROXY_VALUE),
-                ("LANG", "en_US.UTF-8"),
-                ("LC_TIME", "en_US.UTF-8"),
-            ];
-            let mut reg_ok = false;
-            for (k, v) in vars {
-                if set_windows_user_env_var(k, v).is_ok() {
-                    reg_ok = true;
-                }
+            // Self-heal: Stop writing proxy vars into HKCU\Environment.
+            // Clean up any stale HTTP_PROXY / HTTPS_PROXY / ALL_PROXY from HKCU\Environment so upgrades from v1.2.0 are healed.
+            for stale_var in [
+                "HTTP_PROXY",
+                "HTTPS_PROXY",
+                "ALL_PROXY",
+                "NO_PROXY",
+                "http_proxy",
+                "https_proxy",
+                "all_proxy",
+                "no_proxy",
+            ] {
+                let _ = delete_windows_user_env_var(stale_var);
             }
+
             if let Some(timezone) = tz {
                 let trimmed = timezone.trim();
                 if !trimmed.is_empty() {
                     let _ = set_windows_user_env_var("TZ", trimmed);
+                    let _ = set_windows_user_env_var("LANG", "en_US.UTF-8");
+                    let _ = set_windows_user_env_var("LC_TIME", "en_US.UTF-8");
+                    configured_targets.push("Windows Реестр (HKCU\\Environment: TZ/Locale)".to_string());
                 }
             }
             broadcast_windows_env_change();
-            if reg_ok {
-                configured_targets.push("Windows Реестр (HKCU\\Environment)".to_string());
-            }
 
             let mut ps_configured = false;
             for ps_path in get_windows_powershell_profile_paths() {
@@ -1212,6 +1274,23 @@ pub fn disable_cli_protection() {
             }
         }
     }
+}
+
+/// Forcefully and completely cleans all OS, terminal, IDE, and registry proxy traces,
+/// returning a human-readable list of cleaned components.
+pub fn force_clean_all_os_proxy_traces() -> Vec<String> {
+    disable_all_sysproxy();
+    disable_cli_protection();
+    vec![
+        "Системный PAC-прокси".to_string(),
+        "Конфигурации VS Code / Cursor / Claude".to_string(),
+        "Профили терминала и переменные среды ОС".to_string(),
+    ]
+}
+
+/// Forcefully cleans all OS proxy settings, CLI profile blocks, IDE configs, and uninstaller persistent traces.
+pub fn cleanup_all_persistent_settings() {
+    let _ = force_clean_all_os_proxy_traces();
 }
 
 /// Checks whether CLI protection is currently enabled in memory, in shell RC files (~/.zshenv, ~/.zshrc, ~/.bash_profile),
@@ -1396,6 +1475,17 @@ mod tests {
     }
 
     #[test]
+    fn test_sanitize_timezone() {
+        assert_eq!(sanitize_timezone("Europe/London"), Some("Europe/London".to_string()));
+        assert_eq!(sanitize_timezone(" America/New_York "), Some("America/New_York".to_string()));
+        assert_eq!(sanitize_timezone("Etc/GMT+3"), Some("Etc/GMT+3".to_string()));
+        assert_eq!(sanitize_timezone(""), None);
+        assert_eq!(sanitize_timezone("   "), None);
+        assert_eq!(sanitize_timezone("Europe/Berlin; rm -rf /"), None);
+        assert_eq!(sanitize_timezone("$(whoami)"), None);
+    }
+
+    #[test]
     fn test_powershell_profile_with_timezone() {
         let initial = "# Custom powershell user settings\nWrite-Host 'Welcome'\n";
         let updated = upsert_powershell_profile_content_with_tz(
@@ -1403,10 +1493,14 @@ mod tests {
             "http://127.0.0.1:8899",
             Some("Europe/Warsaw"),
         );
+        assert!(updated.contains("$__zastavaUp"));
+        assert!(updated.contains("GetActiveTcpListeners()"));
+        assert!(updated.contains("Port -eq 8899"));
         assert!(updated.contains("$env:HTTP_PROXY = \"http://127.0.0.1:8899\""));
         assert!(updated.contains("$env:TZ = \"Europe/Warsaw\""));
         assert!(updated.contains("$env:LANG = \"en_US.UTF-8\""));
         assert!(updated.contains("$env:LC_TIME = \"en_US.UTF-8\""));
+        assert!(updated.contains("Remove-Item Env:HTTP_PROXY"));
         assert!(updated.contains(ZASTAVA_RC_START));
         assert!(updated.contains(ZASTAVA_RC_END));
 
@@ -1417,6 +1511,7 @@ mod tests {
             Some("Europe/Berlin"),
         );
         assert_eq!(updated2.matches(ZASTAVA_RC_START).count(), 1);
+        assert!(updated2.contains("Port -eq 8900"));
         assert!(updated2.contains("http://127.0.0.1:8900"));
         assert!(updated2.contains("Europe/Berlin"));
         assert!(!updated2.contains("Europe/Warsaw"));
@@ -1426,6 +1521,13 @@ mod tests {
         assert!(!cleaned.contains(ZASTAVA_RC_START));
         assert!(!cleaned.contains("Europe/Berlin"));
         assert!(cleaned.contains("Write-Host 'Welcome'"));
+    }
+
+    #[test]
+    fn test_force_clean_all_os_proxy_traces() {
+        let cleaned = force_clean_all_os_proxy_traces();
+        assert_eq!(cleaned.len(), 3);
+        assert!(cleaned.iter().any(|c| c.contains("PAC")));
     }
 
     #[test]

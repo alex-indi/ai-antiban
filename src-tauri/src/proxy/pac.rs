@@ -1,14 +1,52 @@
 use crate::auditor::rules::ProviderMatrix;
 
 pub const DEFAULT_AI_DOMAINS: &[&str] = &[
+    // Anthropic / Claude / Cursor / OpenRouter / Perplexity
     "claude.ai",
     "claude.com",
     "anthropic.com",
     "claudeusercontent.com",
+    "console.anthropic.com",
+    "statsig.anthropic.com",
+    "cursor.sh",
+    "api2.cursor.sh",
+    "api3.cursor.sh",
+    "cursor.com",
+    "cursor-cdn.com",
+    "openrouter.ai",
+    "poe.com",
+    "perplexity.ai",
+    "pplx.ai",
+    // OpenAI / ChatGPT / Microsoft Copilot / DeepSeek / Mistral / Grok
     "chatgpt.com",
     "openai.com",
     "oaistatic.com",
     "oaiusercontent.com",
+    "auth0.openai.com",
+    "platform.openai.com",
+    "chat.openai.com",
+    "copilot.microsoft.com",
+    "sydney.bing.com",
+    "edgeservices.bing.com",
+    "copilot.cloud.microsoft",
+    "officecopilot.microsoft.com",
+    "githubcopilot.com",
+    "api.githubcopilot.com",
+    "copilot-proxy.githubusercontent.com",
+    "default.exp-tas.com",
+    "codeium.com",
+    "windsurf.com",
+    "codeiumdata.com",
+    "supermaven.com",
+    "deepseek.com",
+    "chat.deepseek.com",
+    "api.deepseek.com",
+    "grok.com",
+    "x.ai",
+    "api.x.ai",
+    "mistral.ai",
+    "chat.mistral.ai",
+    // Google Gemini / AI Studio / Cloud Code / Antigravity / Labs
     "gemini.google.com",
     "aistudio.google.com",
     "makersuite.google.com",
@@ -28,6 +66,11 @@ pub const DEFAULT_AI_DOMAINS: &[&str] = &[
     "antigravity.google",
     "antigravity.google.com",
     "share.gemini.google",
+    "notebooklm.google",
+    "notebooklm.google.com",
+    "idx.google.com",
+    "opal.google.com",
+    "labs.google",
 ];
 
 /// Collects all configured AI domains from the matrix.
@@ -48,6 +91,18 @@ pub fn get_all_ai_domains(matrix: &ProviderMatrix) -> Vec<String> {
     }
 }
 
+/// Collects all configured AI domains from the matrix merged with user-defined custom domains.
+pub fn get_all_ai_domains_with_custom(matrix: &ProviderMatrix, custom_domains: &[String]) -> Vec<String> {
+    let mut domains = get_all_ai_domains(matrix);
+    for cd in custom_domains {
+        let clean = cd.trim().trim_start_matches("*.").trim_start_matches('.').to_lowercase();
+        if !clean.is_empty() && !domains.iter().any(|d| d.eq_ignore_ascii_case(&clean)) {
+            domains.push(clean);
+        }
+    }
+    domains
+}
+
 /// Generates a standard Proxy Auto-Configuration (PAC) script routing AI domains to proxy.
 pub fn generate_pac_script(domains: &[String], proxy_host_port: &str) -> String {
     let domains_json = serde_json::to_string_pretty(domains).unwrap_or_else(|_| "[]".to_string());
@@ -57,6 +112,7 @@ pub fn generate_pac_script(domains: &[String], proxy_host_port: &str) -> String 
 // Automatically routes known AI domains through local hold proxy, keeping everything else DIRECT.
 function FindProxyForURL(url, host) {{
     var aiDomains = {domains_json};
+    host = (host || "").toLowerCase();
 
     for (var i = 0; i < aiDomains.length; i++) {{
         var d = aiDomains[i];
@@ -89,5 +145,15 @@ mod tests {
         assert!(pac.contains("\"gemini.google.com\""));
         assert!(pac.contains("return \"PROXY 127.0.0.1:8899\";"));
         assert!(pac.contains("return \"DIRECT\";"));
+        assert!(pac.contains("host = (host || \"\").toLowerCase();"));
+    }
+
+    #[test]
+    fn test_pac_with_custom_domains() {
+        let matrix = ProviderMatrix::load_bundled().unwrap();
+        let custom = vec!["custom-ai.company.org".to_string(), "claude.ai".to_string()];
+        let merged = get_all_ai_domains_with_custom(&matrix, &custom);
+        assert!(merged.contains(&"custom-ai.company.org".to_string()));
+        assert!(merged.contains(&"claude.ai".to_string()));
     }
 }

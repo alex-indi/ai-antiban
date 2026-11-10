@@ -102,6 +102,30 @@ fn default_true() -> bool {
     true
 }
 
+/// Preset behavior rules when risk or VPN drop is detected.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum InterceptionBehavior {
+    /// Show the top-right non-focus-stealing alert popup and wait for user choice (default)
+    #[default]
+    AskPopup,
+    /// Automatically lock/freeze AI traffic on VPN drop or risk WITHOUT showing any popup ("Тихий лок без попапа")
+    AutoLockSilent,
+    /// Automatically allow session if the new country is not in global_blocked_countries (RU/BY/CN/HK/IR/KP/SY/CU)
+    AutoAllowTrusted,
+}
+
+/// Alert popup screen placement.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PopupPosition {
+    /// Top-right corner of the primary screen (default per user request #8)
+    #[default]
+    TopRight,
+    /// Top-center under the notch
+    TopCenter,
+}
+
 /// Upstream proxy gateway configuration (e.g. SOCKS5 / HTTP tunnel for AI traffic).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UpstreamProxyConfig {
@@ -136,6 +160,12 @@ pub struct AppStateData {
     pub synced_ai_timezone: Option<String>,
     #[serde(default = "default_true")]
     pub auto_update_enabled: bool,
+    #[serde(default)]
+    pub interception_behavior: InterceptionBehavior,
+    #[serde(default)]
+    pub popup_position: PopupPosition,
+    #[serde(default)]
+    pub custom_ai_domains: Vec<String>,
 }
 
 impl Default for AppStateData {
@@ -155,6 +185,9 @@ impl Default for AppStateData {
             warmup_started_at: None,
             synced_ai_timezone: None,
             auto_update_enabled: true,
+            interception_behavior: InterceptionBehavior::AskPopup,
+            popup_position: PopupPosition::TopRight,
+            custom_ai_domains: Vec::new(),
         }
     }
 }
@@ -501,6 +534,14 @@ impl AppState {
         self.save_async().await
     }
 
+    pub async fn set_sysproxy_enabled(&self, _enabled: bool) -> Result<(), StateError> {
+        Ok(())
+    }
+
+    pub async fn set_cli_protection_enabled(&self, _enabled: bool) -> Result<(), StateError> {
+        Ok(())
+    }
+
     // --- Upstream Proxy Gateway ---
 
     pub async fn get_upstream_proxy(&self) -> Option<UpstreamProxyConfig> {
@@ -544,6 +585,66 @@ impl AppState {
             w.synced_ai_timezone = tz;
         }
         self.save_async().await
+    }
+
+    // --- Preset Interception Behavior & Popup Position ---
+
+    pub async fn get_interception_behavior(&self) -> InterceptionBehavior {
+        self.inner.read().await.interception_behavior
+    }
+
+    pub async fn set_interception_behavior(&self, b: InterceptionBehavior) -> Result<(), StateError> {
+        {
+            let mut w = self.inner.write().await;
+            w.interception_behavior = b;
+        }
+        self.save_async().await
+    }
+
+    pub async fn get_popup_position(&self) -> PopupPosition {
+        self.inner.read().await.popup_position
+    }
+
+    pub fn get_popup_position_sync(&self) -> PopupPosition {
+        self.inner.try_read().map(|d| d.popup_position).unwrap_or_default()
+    }
+
+    pub async fn set_popup_position(&self, p: PopupPosition) -> Result<(), StateError> {
+        {
+            let mut w = self.inner.write().await;
+            w.popup_position = p;
+        }
+        self.save_async().await
+    }
+
+    // --- Custom AI Domains ---
+
+    pub async fn get_custom_ai_domains(&self) -> Vec<String> {
+        self.inner.read().await.custom_ai_domains.clone()
+    }
+
+    pub async fn add_custom_ai_domain(&self, domain: String) -> Result<Vec<String>, StateError> {
+        let clean = domain.trim().trim_start_matches("*.").trim_start_matches('.').to_lowercase();
+        let updated = {
+            let mut w = self.inner.write().await;
+            if !clean.is_empty() && !w.custom_ai_domains.iter().any(|d| d == &clean) {
+                w.custom_ai_domains.push(clean);
+            }
+            w.custom_ai_domains.clone()
+        };
+        self.save_async().await?;
+        Ok(updated)
+    }
+
+    pub async fn remove_custom_ai_domain(&self, domain: &str) -> Result<Vec<String>, StateError> {
+        let clean = domain.trim().trim_start_matches("*.").trim_start_matches('.').to_lowercase();
+        let updated = {
+            let mut w = self.inner.write().await;
+            w.custom_ai_domains.retain(|d| d != &clean);
+            w.custom_ai_domains.clone()
+        };
+        self.save_async().await?;
+        Ok(updated)
     }
 
     // --- IP History ---
@@ -1003,5 +1104,45 @@ mod tests {
         let snap6 = state.get_gateway_stats().await;
         assert_eq!(snap6.direct_bypassed_requests, prev_direct + 3);
         assert_eq!(snap6.recent_events.last().unwrap().host, "registry.npmjs.org");
+    }
+
+    #[tokio::test]
+    async fn test_interception_behavior_popup_position_and_custom_domains() {
+        let state = AppState::new_in_memory();
+
+        // Defaults
+        assert_eq!(state.get_interception_behavior().await, InterceptionBehavior::AskPopup);
+        assert_eq!(state.get_popup_position().await, PopupPosition::TopRight);
+        assert!(state.get_custom_ai_domains().await.is_empty());
+
+        // Update interception behavior
+        state.set_interception_behavior(InterceptionBehavior::AutoLockSilent).await.unwrap();
+        assert_eq!(state.get_interception_behavior().await, InterceptionBehavior::AutoLockSilent);
+
+        state.set_interception_behavior(InterceptionBehavior::AutoAllowTrusted).await.unwrap();
+        assert_eq!(state.get_interception_behavior().await, InterceptionBehavior::AutoAllowTrusted);
+
+        // Update popup position
+        state.set_popup_position(PopupPosition::TopCenter).await.unwrap();
+        assert_eq!(state.get_popup_position().await, PopupPosition::TopCenter);
+
+        // Custom AI domains management
+        let domains = state.add_custom_ai_domain("my-local-llm.internal".to_string()).await.unwrap();
+        assert_eq!(domains, vec!["my-local-llm.internal".to_string()]);
+        assert_eq!(state.get_custom_ai_domains().await, vec!["my-local-llm.internal".to_string()]);
+
+        // Trimming, leading wildcard normalization, and deduplication
+        let domains = state.add_custom_ai_domain(" *.Custom-Model.ai ".to_string()).await.unwrap();
+        assert_eq!(domains.len(), 2);
+        assert_eq!(domains[1], "custom-model.ai");
+
+        // Duplicate addition is idempotent
+        let domains = state.add_custom_ai_domain("custom-model.ai".to_string()).await.unwrap();
+        assert_eq!(domains.len(), 2);
+
+        // Removal
+        let domains = state.remove_custom_ai_domain("my-local-llm.internal").await.unwrap();
+        assert_eq!(domains, vec!["custom-model.ai".to_string()]);
+        assert_eq!(state.get_custom_ai_domains().await, vec!["custom-model.ai".to_string()]);
     }
 }

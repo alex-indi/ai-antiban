@@ -4,6 +4,9 @@ export type OverallStatus = "green" | "yellow" | "red";
 
 export type CheckStatus = "ok" | "warning" | "critical" | "green" | "yellow" | "red";
 
+export type InterceptionBehavior = "ask_popup" | "auto_lock_silent" | "auto_allow_trusted";
+export type PopupPosition = "top_right" | "top_center";
+
 export interface CheckResult {
   status: CheckStatus;
   code: string;
@@ -85,6 +88,9 @@ export interface AppStateData {
   warmup_started_at?: number | null;
   synced_ai_timezone?: string | null;
   auto_update_enabled?: boolean;
+  interception_behavior?: InterceptionBehavior;
+  popup_position?: PopupPosition;
+  custom_ai_domains?: string[];
 }
 
 export type AppStateSnapshot = AppStateData;
@@ -213,6 +219,7 @@ export interface ClaudeProfile {
   name: string;
   bound_ip?: string | null;
   bound_country?: string | null;
+  bound_upstream_key?: string | null;
   isolated_device_id: string;
   created_at: number;
   last_used_at: number;
@@ -233,6 +240,7 @@ export interface ProfileSwitchResult {
   cleaned_cache_items: number;
   restored_files: number;
   pinned_ip_updated?: string | null;
+  bound_upstream_key_updated?: string | null;
   message: string;
 }
 

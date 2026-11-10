@@ -26,6 +26,8 @@ import {
   FolderArchive,
   Settings,
   Activity,
+  OctagonAlert,
+  Play,
 } from "lucide-react";
 import {
   AppStateData,
@@ -51,16 +53,19 @@ import {
   fetchAppState,
   getGatewayStats,
   getMockScenario,
+  getNetworkKillswitchStatus,
   getSysproxyStatus,
   installUpdate,
   MockScenario,
   openOsDatetimeSettings,
   pinCurrentIp,
+  resolveInterception,
   scanClaudeLocalData,
   setMockScenario,
   simulateInterception,
   syncAiAgentsTimezone,
   toggleAutoUpdate,
+  toggleNetworkKillswitch,
   toggleStrictPinning,
   toggleSysproxy,
   unblockProvider,
@@ -79,7 +84,7 @@ import { ClaudeProfilesCard } from "./ClaudeProfilesCard";
 import { VpnCrashTestModal } from "./VpnCrashTestModal";
 import { openExternal, openTelegramSupport } from "../utils/opener";
 
-type ActiveTab = "pulse" | "clean-ip" | "bin" | "audit" | "guide";
+type ActiveTab = "pulse" | "clean-ip" | "claude_vault" | "bin" | "audit" | "guide";
 
 export interface ParsedChangelogSection {
   title?: string;
@@ -185,12 +190,19 @@ export const Dashboard: React.FC<DashboardProps> = ({ onSimulateInBrowser }) => 
   const [showSettingsModal, setShowSettingsModal] = useState<boolean>(false);
   const [showCrashTestModal, setShowCrashTestModal] = useState<boolean>(false);
   const [autoUpdateEnabled, setAutoUpdateEnabled] = useState<boolean>(true);
+  const [killswitchFrozen, setKillswitchFrozen] = useState<boolean>(false);
+  const [hideOnboarding, setHideOnboarding] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem("zastava_hide_onboarding_v13") === "true";
+    } catch {
+      return false;
+    }
+  });
 
   const [updaterStatus, setUpdaterStatus] = useState<UpdateStatusPayload | null>(null);
   const [showChangelog, setShowChangelog] = useState<boolean>(false);
   const [showFullReleaseText, setShowFullReleaseText] = useState<boolean>(false);
 
-  const [claudePanelExpanded, setClaudePanelExpanded] = useState<boolean>(false);
   const [claudeSummary, setClaudeSummary] = useState<ClaudeLocalDataSummary | null>(null);
   const [loadingClaudeSummary, setLoadingClaudeSummary] = useState<boolean>(false);
   const [claudeExporting, setClaudeExporting] = useState<boolean>(false);
@@ -287,6 +299,12 @@ export const Dashboard: React.FC<DashboardProps> = ({ onSimulateInBrowser }) => 
     return () => clearInterval(interval);
   }, [activeTab]);
 
+  useEffect(() => {
+    if (activeTab === "claude_vault" && !claudeSummary) {
+      loadClaudeSummary();
+    }
+  }, [activeTab, claudeSummary]);
+
   const handleCheckUpdates = async (silent: boolean = false) => {
     setCheckingUpdate(true);
     try {
@@ -369,6 +387,9 @@ export const Dashboard: React.FC<DashboardProps> = ({ onSimulateInBrowser }) => 
   useEffect(() => {
     runFullAudit(false);
     handleCheckUpdates(true);
+    getNetworkKillswitchStatus()
+      .then((frozen) => setKillswitchFrozen(frozen))
+      .catch(() => {});
     checkCliProtectionStatus()
       .then((active) => {
         if (active) setCopiedCli(true);
@@ -401,6 +422,43 @@ export const Dashboard: React.FC<DashboardProps> = ({ onSimulateInBrowser }) => 
 
       listen("tray://open-crash-test", () => {
         setShowCrashTestModal(true);
+      }).then((un) => unlisteners.push(un));
+
+      // v1.3.0: Tray Event Listeners (Kill-Switch, Profiles & State)
+      listen<boolean>("tray://killswitch-toggled", (event) => {
+        const frozen = event.payload;
+        setKillswitchFrozen(frozen);
+        showToast(
+          frozen ? "СТОП СЕТИ включен" : "Защита в штатном режиме",
+          frozen
+            ? "СТОП СЕТИ включен — все запросы к ИИ заморожены"
+            : "Защита в штатном режиме — доступ к ИИ открыт",
+          frozen ? "warning" : "success"
+        );
+      }).then((un) => unlisteners.push(un));
+
+      listen("tray://state-changed", async () => {
+        try {
+          const st = await fetchAppState();
+          setState(st);
+        } catch {}
+      }).then((un) => unlisteners.push(un));
+
+      listen<any>("tray://profile-switched", async (event) => {
+        try {
+          const st = await fetchAppState();
+          setState(st);
+        } catch {}
+        showToast(
+          "Профиль переключен",
+          event.payload?.name || "Активный профиль Claude обновлен",
+          "info"
+        );
+        runFullAudit(false);
+      }).then((un) => unlisteners.push(un));
+
+      listen("tray://open-profiles", () => {
+        setActiveTab("claude_vault");
       }).then((un) => unlisteners.push(un));
 
       listen<UpdateProgressPayload>("updater://progress", (event) => {
@@ -539,6 +597,47 @@ export const Dashboard: React.FC<DashboardProps> = ({ onSimulateInBrowser }) => 
     }
   };
 
+  const handleToggleKillswitch = async () => {
+    try {
+      const next = !killswitchFrozen;
+      const isFrozen = await toggleNetworkKillswitch(next);
+      setKillswitchFrozen(isFrozen);
+      if (isFrozen) {
+        showToast(
+          "СТОП СЕТИ включен",
+          "СТОП СЕТИ включен — все запросы к ИИ заморожены",
+          "warning"
+        );
+      } else {
+        showToast(
+          "Защита в штатном режиме",
+          "Защита в штатном режиме — доступ к ИИ открыт",
+          "success"
+        );
+      }
+    } catch (err: any) {
+      showToast("Ошибка Kill-Switch", err?.message || String(err), "error");
+    }
+  };
+
+  const handleAllowInterception = async () => {
+    if (!interceptPayload) return;
+    try {
+      await resolveInterception(
+        interceptPayload.id,
+        "AllowSession",
+        interceptPayload.provider,
+        interceptPayload.scope
+      );
+      showToast("Пауза снята", "Трафик к ИИ разрешен для этой сессии", "success");
+    } catch (err: any) {
+      showToast("Ошибка", err?.message || String(err), "error");
+    } finally {
+      setInterceptPayload(null);
+      runFullAudit(false);
+    }
+  };
+
   const handlePinIp = async (ip: string) => {
     try {
       await pinCurrentIp(ip);
@@ -615,14 +714,6 @@ export const Dashboard: React.FC<DashboardProps> = ({ onSimulateInBrowser }) => 
       console.error("Failed to scan Claude data:", err);
     } finally {
       setLoadingClaudeSummary(false);
-    }
-  };
-
-  const handleToggleClaudePanel = () => {
-    const next = !claudePanelExpanded;
-    setClaudePanelExpanded(next);
-    if (next && !claudeSummary) {
-      loadClaudeSummary();
     }
   };
 
@@ -781,15 +872,15 @@ export const Dashboard: React.FC<DashboardProps> = ({ onSimulateInBrowser }) => 
           )}
         </div>
 
-        <header className="flex items-center justify-between pb-2.5 border-b border-white/[0.07]">
+        <header className="flex items-center justify-between pb-2.5 border-b border-white/[0.07] gap-2">
           {/* Logo & Title */}
-          <div className="flex items-center gap-2">
-            <div className="w-6 h-6 rounded-md bg-emerald-500/10 border border-emerald-500/25 flex items-center justify-center text-emerald-400">
+          <div className="flex items-center gap-2 min-w-0">
+            <div className="w-6 h-6 rounded-md bg-emerald-500/10 border border-emerald-500/25 flex items-center justify-center text-emerald-400 shrink-0">
               <Shield className="w-3.5 h-3.5" strokeWidth={1.75} />
             </div>
-            <div>
+            <div className="min-w-0">
               <div className="flex items-center gap-1.5">
-                <h1 className="text-xs font-bold tracking-tight text-white">
+                <h1 className="text-xs font-bold tracking-tight text-white whitespace-nowrap">
                   Застава
                 </h1>
                 <button
@@ -797,30 +888,58 @@ export const Dashboard: React.FC<DashboardProps> = ({ onSimulateInBrowser }) => 
                   disabled={checkingUpdate}
                   onClick={() => handleCheckUpdates(false)}
                   title="Проверить обновления из GitHub Releases"
-                  className={`text-[9px] px-1.5 py-0.2 rounded border font-mono tabular-nums flex items-center gap-1 cursor-pointer transition-colors ${
+                  className={`text-[9px] px-1.5 py-0.2 rounded border font-mono tabular-nums flex items-center gap-1 cursor-pointer transition-colors shrink-0 whitespace-nowrap ${
                     updateInfo?.update_available
                       ? "bg-amber-500/15 border-amber-500/40 text-amber-300 font-semibold"
                       : "bg-zinc-900 hover:bg-zinc-800 border-white/[0.08] text-zinc-300"
                   }`}
                 >
-                  <span>v1.2.0</span>
+                  <span>v1.3.0</span>
                   <Download className={`w-2.5 h-2.5 ${checkingUpdate ? "animate-bounce text-emerald-400" : updateInfo?.update_available ? "text-amber-300" : "text-zinc-400"}`} />
                 </button>
               </div>
-              <p className="text-[9.5px] text-zinc-500 leading-none mt-0.5">
+              <p className="text-[9.5px] text-zinc-500 leading-none mt-0.5 truncate max-w-[170px]">
                 Защита от бана ИИ · Без чтения чатов
               </p>
             </div>
           </div>
 
-          {/* Controls: Settings Gear, Support, PAC Proxy Toggle & Refresh */}
-          <div className="flex items-center gap-1.5">
+          {/* Controls: Kill-Switch, Settings Gear, Support, PAC Proxy Toggle & Refresh */}
+          <div className="flex items-center gap-1.5 shrink-0">
+            {/* Kill-switch button */}
+            <button
+              type="button"
+              onClick={handleToggleKillswitch}
+              title={
+                killswitchFrozen
+                  ? "СТОП СЕТИ АКТИВЕН — Нажмите, чтобы разморозить ИИ"
+                  : "Экстренно заморозить все запросы к ИИ в 1 клик"
+              }
+              className={`whitespace-nowrap shrink-0 flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[10px] font-bold tracking-wide border transition-colors cursor-pointer ${
+                killswitchFrozen
+                  ? "bg-rose-500/20 border-rose-500/50 text-rose-200 animate-pulse font-bold"
+                  : "bg-rose-500/10 hover:bg-rose-500/20 border-rose-500/30 text-rose-300"
+              }`}
+            >
+              {killswitchFrozen ? (
+                <>
+                  <Play className="w-3 h-3 text-emerald-400 fill-emerald-400 shrink-0" />
+                  <span>ВКЛЮЧИТЬ СЕТЬ ИИ</span>
+                </>
+              ) : (
+                <>
+                  <OctagonAlert className="w-3 h-3 text-rose-400 shrink-0" />
+                  <span>СТОП СЕТИ</span>
+                </>
+              )}
+            </button>
+
             {/* Gear Button -> SettingsModal */}
             <button
               type="button"
               onClick={() => setShowSettingsModal(true)}
               title="Настройки и сетевая прозрачность"
-              className="p-1 rounded-md bg-zinc-900 hover:bg-zinc-800 border border-white/[0.08] text-zinc-400 hover:text-white transition-colors cursor-pointer"
+              className="p-1.5 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-white/[0.08] text-zinc-400 hover:text-white transition-colors cursor-pointer shrink-0"
             >
               <Settings className="w-3.5 h-3.5" />
             </button>
@@ -829,9 +948,9 @@ export const Dashboard: React.FC<DashboardProps> = ({ onSimulateInBrowser }) => 
               type="button"
               onClick={handleOpenSupport}
               title="Связь и поддержка в Telegram: @nomadnocode"
-              className="flex items-center gap-1 px-1.5 py-1 rounded-md bg-sky-500/10 hover:bg-sky-500/20 border border-sky-500/25 text-[10px] font-sans font-medium text-sky-300 hover:text-sky-200 transition-colors cursor-pointer"
+              className="flex items-center gap-1 px-1.5 py-1.5 rounded-lg bg-sky-500/10 hover:bg-sky-500/20 border border-sky-500/25 text-[10px] font-sans font-medium text-sky-300 hover:text-sky-200 transition-colors cursor-pointer shrink-0 whitespace-nowrap"
             >
-              <Send className="w-2.5 h-2.5 text-sky-400" />
+              <Send className="w-2.5 h-2.5 text-sky-400 shrink-0" />
               <span>ТГ</span>
             </button>
 
@@ -839,14 +958,14 @@ export const Dashboard: React.FC<DashboardProps> = ({ onSimulateInBrowser }) => 
               type="button"
               onClick={handleToggleSysproxy}
               title={sysproxyActive ? "Отключить защиту трафика" : "Включить защиту трафика ИИ"}
-              className={`flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-mono border transition-all cursor-pointer ${
+              className={`whitespace-nowrap shrink-0 flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[10px] font-mono border transition-all cursor-pointer ${
                 sysproxyActive
                   ? "bg-emerald-500/15 border-emerald-500/30 text-emerald-300 font-semibold shadow-xs"
                   : "bg-zinc-900 border-white/[0.08] text-zinc-400 hover:text-zinc-200"
               }`}
             >
               <Radio
-                className={`w-3 h-3 ${
+                className={`w-3 h-3 shrink-0 ${
                   sysproxyActive ? "text-emerald-400 animate-pulse" : "text-zinc-500"
                 }`}
               />
@@ -858,22 +977,22 @@ export const Dashboard: React.FC<DashboardProps> = ({ onSimulateInBrowser }) => 
               disabled={refreshing}
               onClick={() => runFullAudit(true)}
               title="Перепроверить соединение"
-              className="flex items-center gap-1 px-1.5 py-1 rounded-md bg-zinc-900 hover:bg-zinc-800 border border-white/[0.08] text-[10px] font-mono text-zinc-400 hover:text-white transition-colors cursor-pointer"
+              className="whitespace-nowrap shrink-0 flex items-center gap-1 px-2 py-1.5 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-white/[0.08] text-[10px] font-mono text-zinc-400 hover:text-white transition-colors cursor-pointer"
             >
               <RotateCw
-                className={`w-3 h-3 ${refreshing ? "animate-spin text-emerald-400" : ""}`}
+                className={`w-3 h-3 shrink-0 ${refreshing ? "animate-spin text-emerald-400" : ""}`}
               />
               <span className="tabular-nums text-[9px]">{scanLatencyMs}мс</span>
             </button>
           </div>
         </header>
 
-        {/* Segmented Control Navigation (5 tabs) */}
-        <nav className="mt-2.5 grid grid-cols-5 gap-1 p-0.5 bg-[#12141A] rounded-lg border border-white/[0.07] text-[11px] font-medium">
+        {/* Segmented Control Navigation (6 tabs) */}
+        <nav className="mt-2.5 grid grid-cols-6 gap-1 p-0.5 bg-[#12141A] rounded-lg border border-white/[0.07] text-[10px] font-medium tracking-tight">
           <button
             type="button"
             onClick={() => setActiveTab("pulse")}
-            className={`py-1.5 px-0.5 rounded-md transition-all text-center cursor-pointer ${
+            className={`py-1.5 px-0.5 rounded-md transition-all text-center cursor-pointer truncate ${
               activeTab === "pulse"
                 ? "bg-white/[0.12] text-white font-bold shadow-xs"
                 : "text-zinc-400 hover:text-zinc-200"
@@ -885,22 +1004,36 @@ export const Dashboard: React.FC<DashboardProps> = ({ onSimulateInBrowser }) => 
           <button
             type="button"
             onClick={() => setActiveTab("clean-ip")}
-            className={`py-1.5 px-0.5 rounded-md transition-all text-center cursor-pointer flex items-center justify-center gap-1 ${
+            className={`py-1.5 px-0.5 rounded-md transition-all text-center cursor-pointer flex items-center justify-center gap-1 truncate ${
               activeTab === "clean-ip"
                 ? "bg-white/[0.12] text-white font-bold shadow-xs"
                 : "text-zinc-400 hover:text-zinc-200"
             }`}
           >
-            <span>Чистый IP</span>
+            <span className="truncate">Чистый IP</span>
             {state?.upstream_proxy?.enabled && (
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse shrink-0" />
             )}
           </button>
 
           <button
             type="button"
+            onClick={() => setActiveTab("claude_vault")}
+            title="Бэкап данных Claude и мульти-аккаунт профили"
+            className={`py-1.5 px-0.5 rounded-md transition-all text-center cursor-pointer flex items-center justify-center gap-1 truncate ${
+              activeTab === "claude_vault"
+                ? "bg-white/[0.12] text-white font-bold shadow-xs"
+                : "text-zinc-400 hover:text-zinc-200"
+            }`}
+          >
+            <FolderArchive className="w-2.5 h-2.5 shrink-0 text-emerald-400" />
+            <span className="truncate">Бэкап и Профили</span>
+          </button>
+
+          <button
+            type="button"
             onClick={() => setActiveTab("bin")}
-            className={`py-1.5 px-0.5 rounded-md transition-all text-center cursor-pointer ${
+            className={`py-1.5 px-0.5 rounded-md transition-all text-center cursor-pointer truncate ${
               activeTab === "bin"
                 ? "bg-white/[0.12] text-white font-bold shadow-xs"
                 : "text-zinc-400 hover:text-zinc-200"
@@ -912,7 +1045,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ onSimulateInBrowser }) => 
           <button
             type="button"
             onClick={() => setActiveTab("audit")}
-            className={`py-1.5 px-0.5 rounded-md transition-all text-center cursor-pointer ${
+            className={`py-1.5 px-0.5 rounded-md transition-all text-center cursor-pointer truncate ${
               activeTab === "audit"
                 ? "bg-white/[0.12] text-white font-bold shadow-xs"
                 : "text-zinc-400 hover:text-zinc-200"
@@ -924,7 +1057,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ onSimulateInBrowser }) => 
           <button
             type="button"
             onClick={() => setActiveTab("guide")}
-            className={`py-1.5 px-0.5 rounded-md transition-all text-center cursor-pointer ${
+            className={`py-1.5 px-0.5 rounded-md transition-all text-center cursor-pointer truncate ${
               activeTab === "guide"
                 ? "bg-white/[0.12] text-white font-bold shadow-xs"
                 : "text-zinc-400 hover:text-zinc-200"
@@ -933,6 +1066,44 @@ export const Dashboard: React.FC<DashboardProps> = ({ onSimulateInBrowser }) => 
             Гайды
           </button>
         </nav>
+
+        {/* Tauri In-Window Non-blocking Interception Alert Banner */}
+        {isTauri() && interceptPayload && (
+          <div className="mt-2.5 bg-rose-950/40 border border-rose-500/40 rounded-xl p-2.5 flex items-center justify-between gap-2 shadow-lg animate-in fade-in duration-200">
+            <div className="flex items-center gap-2 min-w-0">
+              <div className="w-6 h-6 rounded-md bg-rose-500/20 border border-rose-500/30 flex items-center justify-center text-rose-300 shrink-0">
+                <ShieldAlert className="w-3.5 h-3.5" />
+              </div>
+              <div className="min-w-0">
+                <div className="text-[11px] font-bold text-rose-200 truncate">
+                  Запрос к {interceptPayload.provider.toUpperCase()} приостановлен
+                </div>
+                <div className="text-[9.5px] text-zinc-400 truncate">
+                  {interceptPayload.network_change?.new_country === "RU"
+                    ? "Обнаружен выход в сеть РФ без VPN"
+                    : `IP: ${interceptPayload.report?.telemetry?.ip || "--"} (${interceptPayload.report?.telemetry?.country_code || "--"})`}
+                </div>
+              </div>
+            </div>
+            <div className="flex items-center gap-1.5 shrink-0">
+              <button
+                type="button"
+                onClick={handleAllowInterception}
+                className="px-2 py-1 rounded-md bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-500/40 text-[10px] font-medium text-emerald-300 transition-colors cursor-pointer"
+              >
+                Снять паузу (Разрешить)
+              </button>
+              <button
+                type="button"
+                onClick={() => setInterceptPayload(null)}
+                className="p-1 rounded-md bg-zinc-800/80 hover:bg-zinc-700 text-zinc-400 hover:text-white transition-colors cursor-pointer"
+                title="✕ Скрыть"
+              >
+                <X className="w-3 h-3" />
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* Main Tab Content */}
         <main className="mt-2.5 flex-1">
@@ -1019,6 +1190,58 @@ export const Dashboard: React.FC<DashboardProps> = ({ onSimulateInBrowser }) => 
                       )}
                     </div>
                   )}
+                </div>
+              )}
+
+              {/* Plain-Language 3-Step Onboarding Strip for Non-Coders */}
+              {!hideOnboarding && (
+                <div className="bg-[#12141A] rounded-xl border border-emerald-500/25 p-3 space-y-2 shadow-sm font-sans relative">
+                  <div className="flex items-center justify-between pb-1.5 border-b border-white/[0.06]">
+                    <div className="flex items-center gap-1.5">
+                      <Zap className="w-3.5 h-3.5 text-emerald-400" />
+                      <span className="text-[11px] font-bold text-white tracking-tight">
+                        Как пользоваться Заставой (3 простых шага)
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setHideOnboarding(true);
+                        try {
+                          localStorage.setItem("zastava_hide_onboarding_v13", "true");
+                        } catch {}
+                      }}
+                      className="text-[9.5px] text-zinc-400 hover:text-white px-1.5 py-0.5 rounded bg-zinc-900 hover:bg-zinc-800 border border-white/[0.06] cursor-pointer transition-colors"
+                    >
+                      Понятно, скрыть ✕
+                    </button>
+                  </div>
+                  <div className="grid grid-cols-3 gap-2 pt-0.5">
+                    <div className="bg-zinc-900/60 rounded-lg p-2 border border-white/[0.04] space-y-1">
+                      <div className="text-[10.5px] font-bold text-emerald-300">
+                        1. Включите ваш VPN
+                      </div>
+                      <p className="text-[9.5px] text-zinc-400 leading-tight">
+                        Застава сама проверит чистоту IP-адреса и совпадение часового пояса
+                      </p>
+                    </div>
+                    <div className="bg-zinc-900/60 rounded-lg p-2 border border-white/[0.04] space-y-1">
+                      <div className="text-[10.5px] font-bold text-sky-300">
+                        2. Откройте ИИ как обычно
+                      </div>
+                      <p className="text-[9.5px] text-zinc-400 leading-tight">
+                        Работайте в браузере, приложении Claude, Cursor или Word. Обычные сайты идут напрямую без тормозов
+                      </p>
+                    </div>
+                    <div className="bg-zinc-900/60 rounded-lg p-2 border border-white/[0.04] space-y-1">
+                      <div className="text-[10.5px] font-bold text-amber-300">
+                        3. Авто-защита от бана
+                      </div>
+                      <p className="text-[9.5px] text-zinc-400 leading-tight">
+                        Если VPN оборвётся, Застава мгновенно поставит ИИ на паузу, чтобы ваш российский IP не улетел в нейросеть
+                      </p>
+                    </div>
+                  </div>
                 </div>
               )}
 
@@ -1505,20 +1728,6 @@ export const Dashboard: React.FC<DashboardProps> = ({ onSimulateInBrowser }) => 
                 </div>
               </div>
 
-              {/* v1.2.0: Claude Multi-Account Sandbox Card */}
-              <ClaudeProfilesCard
-                currentIp={currentIp}
-                currentCountry={currentCountry}
-                onProfileSwitched={(_name, pin) => {
-                  if (pin) {
-                    handlePinIp(pin);
-                  } else {
-                    runFullAudit(false);
-                  }
-                }}
-                onToast={showToast}
-              />
-
               {/* 3. Статус по сервисам (ProviderMatrix) */}
               <ProviderMatrix
                 reports={reports}
@@ -1532,175 +1741,25 @@ export const Dashboard: React.FC<DashboardProps> = ({ onSimulateInBrowser }) => 
                 onRefresh={() => runFullAudit(true)}
               />
 
-              {/* 4. Кэш клиентов и перенос контекста Claude */}
-              <div className="bg-[#12141A] rounded-xl border border-white/[0.08] p-3 space-y-2.5 shadow-xs">
-                <div
-                  onClick={handleToggleClaudePanel}
-                  className="flex items-center justify-between cursor-pointer group select-none"
-                >
-                  <div className="flex items-center gap-2.5 min-w-0">
-                    <div className="w-7 h-7 rounded-lg bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 flex items-center justify-center shrink-0">
-                      <FolderArchive className="w-3.5 h-3.5" />
-                    </div>
-                    <div className="min-w-0">
-                      <div className="text-xs font-semibold text-white group-hover:text-emerald-300 transition-colors">
-                        Кэш клиентов и перенос контекста Claude
-                      </div>
-                      <div className="text-[10px] text-zinc-400 truncate">
-                        Экспорт сессий/памяти для любого ИИ и глубокий сброс меток блокировки
-                      </div>
-                    </div>
+              {/* Quick Navigation Card to Claude Vault (Backup & Profiles) */}
+              <div
+                onClick={() => setActiveTab("claude_vault")}
+                className="p-3 rounded-xl bg-gradient-to-r from-emerald-950/30 via-zinc-900 to-[#12141A] border border-white/[0.08] hover:border-emerald-500/40 cursor-pointer flex items-center justify-between transition-all group shadow-xs"
+              >
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <div className="w-7 h-7 rounded-lg bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 flex items-center justify-center shrink-0">
+                    <FolderArchive className="w-3.5 h-3.5" />
                   </div>
-                  <div className="flex items-center gap-1.5 shrink-0 ml-2">
-                    <span className="text-[10px] font-mono text-zinc-400 group-hover:text-zinc-200">
-                      {claudePanelExpanded ? "Свернуть" : "Открыть"}
-                    </span>
-                    <ChevronRight
-                      className={`w-3.5 h-3.5 text-zinc-400 group-hover:text-white transition-transform duration-200 ${
-                        claudePanelExpanded ? "rotate-90" : ""
-                      }`}
-                    />
+                  <div className="min-w-0">
+                    <div className="text-xs font-semibold text-white group-hover:text-emerald-300 transition-colors flex items-center gap-1.5 truncate">
+                      <span>Бэкап памяти Claude и мульти-аккаунты</span>
+                    </div>
+                    <div className="text-[10px] text-zinc-400 truncate">
+                      Нужен бэкап памяти Claude или переключение между аккаунтами? → Открыть вкладку «Бэкап и Профили»
+                    </div>
                   </div>
                 </div>
-
-                {claudePanelExpanded && (
-                  <div className="pt-2 border-t border-white/[0.06] space-y-3 animate-in fade-in duration-150">
-                    {/* Экспорт ~/.claude */}
-                    <div className="bg-[#0c0e14] rounded-lg p-2.5 border border-white/[0.06] space-y-2">
-                      <div className="flex items-center justify-between">
-                        <div className="text-[10.5px] font-semibold text-zinc-200 flex items-center gap-1.5">
-                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0" />
-                          <span>Экспорт локальных данных Claude (~/.claude)</span>
-                        </div>
-                        <button
-                          type="button"
-                          disabled={loadingClaudeSummary}
-                          onClick={loadClaudeSummary}
-                          className="text-[9px] font-mono text-zinc-400 hover:text-zinc-200 flex items-center gap-1 cursor-pointer"
-                          title="Пересканировать директорию ~/.claude"
-                        >
-                          <RotateCw
-                            className={`w-2.5 h-2.5 ${
-                              loadingClaudeSummary ? "animate-spin text-emerald-400" : ""
-                            }`}
-                          />
-                          <span>Сканировать</span>
-                        </button>
-                      </div>
-
-                      <div className="bg-black/50 rounded px-2.5 py-1.5 border border-white/[0.04] text-[9.5px] font-mono tabular-nums text-zinc-300 space-y-1">
-                        <div className="flex items-center justify-between flex-wrap gap-x-2 gap-y-0.5">
-                          <span>
-                            Проектов:{" "}
-                            <strong className="text-emerald-300 font-bold">
-                              {claudeSummary?.projects_count ?? 0}
-                            </strong>
-                          </span>
-                          <span>·</span>
-                          <span>
-                            Сессий (.jsonl):{" "}
-                            <strong className="text-emerald-300 font-bold">
-                              {claudeSummary?.sessions_count ?? 0}
-                            </strong>
-                          </span>
-                          <span>·</span>
-                          <span>
-                            Память:{" "}
-                            <strong className="text-emerald-300 font-bold">
-                              {claudeSummary?.memory_files_count ?? 0}
-                            </strong>
-                          </span>
-                          <span>·</span>
-                          <span>
-                            Объем:{" "}
-                            <strong className="text-emerald-300 font-bold">
-                              {((claudeSummary?.total_size_bytes ?? 0) / (1024 * 1024)).toFixed(1)} МБ
-                            </strong>
-                          </span>
-                        </div>
-                      </div>
-
-                      <div className="grid grid-cols-2 gap-2 pt-0.5">
-                        <button
-                          type="button"
-                          disabled={claudeExporting}
-                          onClick={handleExportClaude}
-                          className="py-1.5 px-2 rounded-lg bg-emerald-500 hover:bg-emerald-400 active:scale-[0.99] text-zinc-950 text-[10.5px] font-sans font-bold flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50 transition-colors truncate"
-                        >
-                          <FolderArchive className="w-3 h-3 shrink-0" />
-                          <span className="truncate">
-                            {claudeExporting ? "Упаковка..." : "Упаковать архив"}
-                          </span>
-                        </button>
-
-                        <button
-                          type="button"
-                          disabled={claudeExporting}
-                          onClick={handleCopyRestorePrompt}
-                          className="py-1.5 px-2 rounded-lg bg-zinc-900 hover:bg-zinc-800 active:scale-[0.99] border border-white/[0.1] hover:border-white/[0.2] text-zinc-200 text-[10.5px] font-sans font-medium flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50 transition-colors truncate"
-                        >
-                          {copiedPrompt ? (
-                            <>
-                              <Check className="w-3 h-3 text-emerald-400 shrink-0" />
-                              <span className="text-emerald-300 truncate">Промт скопирован</span>
-                            </>
-                          ) : (
-                            <>
-                              <Copy className="w-3 h-3 text-zinc-400 shrink-0" />
-                              <span className="truncate">Скопировать промт</span>
-                            </>
-                          )}
-                        </button>
-                      </div>
-
-                      {claudeExportResult && (
-                        <div className="bg-emerald-500/10 border border-emerald-500/25 rounded-md p-2 text-[9.5px] font-mono text-emerald-300 space-y-0.5 animate-in fade-in duration-150">
-                          <div className="font-bold flex items-center gap-1">
-                            <CheckCircle2 className="w-3 h-3 text-emerald-400 shrink-0" />
-                            <span>Архив сохранен на Рабочем столе:</span>
-                          </div>
-                          <div className="text-zinc-300 truncate">
-                            {claudeExportResult.zip_archive_path || claudeExportResult.export_dir_path}
-                          </div>
-                        </div>
-                      )}
-                    </div>
-
-                    {/* Сброс кэша Desktop */}
-                    <div className="bg-[#0c0e14] rounded-lg p-2.5 border border-white/[0.06] space-y-2">
-                      <div className="text-[10.5px] font-semibold text-zinc-200 flex items-center gap-1.5">
-                        <span className="w-1.5 h-1.5 rounded-full bg-rose-400 shrink-0" />
-                        <span>Глубокий сброс кэша и меток устройства</span>
-                      </div>
-
-                      <div className="grid grid-cols-2 gap-2 pt-0.5">
-                        <button
-                          type="button"
-                          disabled={cleaningClaude}
-                          onClick={() => handleCleanSpecificClientCache("anthropic")}
-                          className="py-1.5 px-2 rounded-lg bg-zinc-900 hover:bg-zinc-800 active:scale-[0.99] border border-rose-500/30 hover:border-rose-500/50 text-rose-300 text-[10.5px] font-sans font-medium flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50 transition-colors truncate"
-                        >
-                          <Trash2 className="w-3 h-3 text-rose-400 shrink-0" />
-                          <span className="truncate">
-                            {cleaningClaude ? "Очистка..." : "Кэш Claude Desktop"}
-                          </span>
-                        </button>
-
-                        <button
-                          type="button"
-                          disabled={cleaningGpt}
-                          onClick={() => handleCleanSpecificClientCache("openai")}
-                          className="py-1.5 px-2 rounded-lg bg-zinc-900 hover:bg-zinc-800 active:scale-[0.99] border border-white/[0.1] hover:border-white/[0.2] text-zinc-300 hover:text-white text-[10.5px] font-sans font-medium flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50 transition-colors truncate"
-                        >
-                          <Trash2 className="w-3 h-3 text-zinc-400 shrink-0" />
-                          <span className="truncate">
-                            {cleaningGpt ? "Очистка..." : "Кэш ChatGPT Desktop"}
-                          </span>
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                )}
+                <ChevronRight className="w-4 h-4 text-emerald-400 group-hover:translate-x-1 transition-transform shrink-0" />
               </div>
 
               {/* 5. Баннер быстрого перехода в «Чистый IP» */}
@@ -1748,6 +1807,185 @@ export const Dashboard: React.FC<DashboardProps> = ({ onSimulateInBrowser }) => 
                 }}
                 onToast={showToast}
               />
+            </div>
+          )}
+
+          {activeTab === "claude_vault" && (
+            <div className="space-y-3.5 animate-in fade-in duration-150">
+              {/* 1. Claude Data Backup & Export / Import card */}
+              <div className="bg-[#12141A] rounded-xl border border-white/[0.08] p-3.5 space-y-3 shadow-xs">
+                <div className="flex items-center justify-between pb-2 border-b border-white/[0.05]">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <div className="w-6 h-6 rounded-md bg-emerald-500/10 border border-emerald-500/25 flex items-center justify-center text-emerald-400 shrink-0">
+                      <FolderArchive className="w-3.5 h-3.5" />
+                    </div>
+                    <div className="min-w-0">
+                      <div className="text-xs font-bold text-white tracking-tight flex items-center gap-1.5 truncate">
+                        <span>Экспорт и бэкап данных Claude</span>
+                        <span className="px-1.5 py-0.2 rounded bg-emerald-500/15 text-emerald-300 font-mono text-[9px] font-bold">
+                          ~/.claude
+                        </span>
+                      </div>
+                      <div className="text-[10px] text-zinc-400 truncate">
+                        Резервное копирование проектов, сессий и контекста в 1 клик
+                      </div>
+                    </div>
+                  </div>
+
+                  <button
+                    type="button"
+                    disabled={loadingClaudeSummary}
+                    onClick={loadClaudeSummary}
+                    className="p-1 rounded-md text-zinc-400 hover:text-white hover:bg-white/[0.06] cursor-pointer transition-colors shrink-0"
+                    title="Пересканировать директорию ~/.claude"
+                  >
+                    <RotateCw
+                      className={`w-3 h-3 ${
+                        loadingClaudeSummary ? "animate-spin text-emerald-400" : ""
+                      }`}
+                    />
+                  </button>
+                </div>
+
+                <div className="text-[10.5px] text-zinc-300 leading-relaxed bg-[#0c0e14] rounded-lg p-2.5 border border-white/[0.04]">
+                  Автоматически собирает историю диалогов, проекты и долговременную память Claude из директории <span className="text-zinc-100 font-mono">~/.claude</span>. Позволяет перенести накопленный контекст на другой аккаунт или упаковать защищенный архив на Рабочий стол перед сменой профиля.
+                </div>
+
+                {/* Stats summary */}
+                <div className="bg-black/50 rounded-lg px-3 py-2 border border-white/[0.04] text-[10px] font-mono tabular-nums text-zinc-300">
+                  <div className="flex items-center justify-between flex-wrap gap-x-2 gap-y-1">
+                    <span>
+                      Проектов:{" "}
+                      <strong className="text-emerald-300 font-bold">
+                        {claudeSummary?.projects_count ?? 0}
+                      </strong>
+                    </span>
+                    <span>·</span>
+                    <span>
+                      Сессий (.jsonl):{" "}
+                      <strong className="text-emerald-300 font-bold">
+                        {claudeSummary?.sessions_count ?? 0}
+                      </strong>
+                    </span>
+                    <span>·</span>
+                    <span>
+                      Память:{" "}
+                      <strong className="text-emerald-300 font-bold">
+                        {claudeSummary?.memory_files_count ?? 0}
+                      </strong>
+                    </span>
+                    <span>·</span>
+                    <span>
+                      Объем:{" "}
+                      <strong className="text-emerald-300 font-bold">
+                        {((claudeSummary?.total_size_bytes ?? 0) / (1024 * 1024)).toFixed(1)} МБ
+                      </strong>
+                    </span>
+                  </div>
+                </div>
+
+                {/* Export & copy buttons */}
+                <div className="grid grid-cols-2 gap-2 pt-0.5">
+                  <button
+                    type="button"
+                    disabled={claudeExporting}
+                    onClick={handleExportClaude}
+                    className="py-2 px-3 rounded-lg bg-emerald-500 hover:bg-emerald-400 active:scale-[0.99] text-zinc-950 text-xs font-sans font-bold flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50 transition-colors shadow-sm truncate"
+                  >
+                    <FolderArchive className="w-3.5 h-3.5 shrink-0" />
+                    <span className="truncate">
+                      {claudeExporting ? "Упаковка..." : "Упаковать архив на Рабочий стол"}
+                    </span>
+                  </button>
+
+                  <button
+                    type="button"
+                    disabled={claudeExporting}
+                    onClick={handleCopyRestorePrompt}
+                    className="py-2 px-3 rounded-lg bg-zinc-900 hover:bg-zinc-800 active:scale-[0.99] border border-white/[0.1] hover:border-white/[0.2] text-zinc-200 text-xs font-sans font-medium flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50 transition-colors truncate"
+                  >
+                    {copiedPrompt ? (
+                      <>
+                        <Check className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                        <span className="text-emerald-300 truncate">Промт скопирован</span>
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="w-3.5 h-3.5 text-zinc-400 shrink-0" />
+                        <span className="truncate">Скопировать промт переноса</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+
+                {claudeExportResult && (
+                  <div className="bg-emerald-500/10 border border-emerald-500/25 rounded-lg p-2.5 text-[10px] font-mono text-emerald-300 space-y-1 animate-in fade-in duration-150">
+                    <div className="font-bold flex items-center gap-1.5 text-xs">
+                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                      <span>Архив успешно сохранен на Рабочем столе:</span>
+                    </div>
+                    <div className="text-zinc-300 truncate text-[10px] pl-5">
+                      {claudeExportResult.zip_archive_path || claudeExportResult.export_dir_path}
+                    </div>
+                  </div>
+                )}
+
+                {/* Deep Cache Cleaner */}
+                <div className="bg-[#0c0e14] rounded-lg p-3 border border-white/[0.06] space-y-2 pt-2.5">
+                  <div className="text-[11px] font-semibold text-zinc-200 flex items-center justify-between">
+                    <div className="flex items-center gap-1.5">
+                      <span className="w-1.5 h-1.5 rounded-full bg-rose-400 shrink-0" />
+                      <span>Глубокий сброс кэша и меток устройства</span>
+                    </div>
+                    <span className="text-[9.5px] font-mono text-zinc-500">
+                      Сброс Device ID и сессий
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2 pt-0.5">
+                    <button
+                      type="button"
+                      disabled={cleaningClaude}
+                      onClick={() => handleCleanSpecificClientCache("anthropic")}
+                      className="py-1.5 px-2 rounded-lg bg-zinc-900 hover:bg-zinc-800 active:scale-[0.99] border border-rose-500/30 hover:border-rose-500/50 text-rose-300 text-[10.5px] font-sans font-medium flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50 transition-colors truncate"
+                    >
+                      <Trash2 className="w-3 h-3 text-rose-400 shrink-0" />
+                      <span className="truncate">
+                        {cleaningClaude ? "Очистка..." : "Кэш Claude Desktop"}
+                      </span>
+                    </button>
+
+                    <button
+                      type="button"
+                      disabled={cleaningGpt}
+                      onClick={() => handleCleanSpecificClientCache("openai")}
+                      className="py-1.5 px-2 rounded-lg bg-zinc-900 hover:bg-zinc-800 active:scale-[0.99] border border-white/[0.1] hover:border-white/[0.2] text-zinc-300 hover:text-white text-[10.5px] font-sans font-medium flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50 transition-colors truncate"
+                    >
+                      <Trash2 className="w-3 h-3 text-zinc-400 shrink-0" />
+                      <span className="truncate">
+                        {cleaningGpt ? "Очистка..." : "Кэш ChatGPT Desktop"}
+                      </span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* 2. Claude Multi-Account Sandbox Card right below it */}
+              <div id="claude-profiles-section">
+                <ClaudeProfilesCard
+                  currentIp={currentIp}
+                  currentCountry={currentCountry}
+                  activeUpstreamKey={state?.upstream_proxy?.raw_key}
+                  onProfileSwitched={(_name, pin) => {
+                    if (pin) {
+                      handlePinIp(pin);
+                    } else {
+                      runFullAudit(false);
+                    }
+                  }}
+                  onToast={showToast}
+                />
+              </div>
             </div>
           )}
 
@@ -1837,6 +2075,13 @@ export const Dashboard: React.FC<DashboardProps> = ({ onSimulateInBrowser }) => 
         onClose={() => setShowSettingsModal(false)}
         autoUpdateEnabled={autoUpdateEnabled}
         onToggleAutoUpdate={handleToggleAutoUpdate}
+        interceptionBehavior={state?.interception_behavior}
+        popupPosition={state?.popup_position}
+        customAiDomains={state?.custom_ai_domains}
+        onStateUpdated={() => fetchAppState().then(setState)}
+        onToast={(title, msg, type) =>
+          showToast(title, msg, type === "warn" ? "warning" : type || "info")
+        }
       />
 
       <VpnCrashTestModal
@@ -1921,8 +2166,8 @@ export const Dashboard: React.FC<DashboardProps> = ({ onSimulateInBrowser }) => 
         </div>
       )}
 
-      {/* In-window Emergency Interception Overlay */}
-      {interceptPayload && (
+      {/* In-window Emergency Interception Overlay (browser preview only) */}
+      {!isTauri() && interceptPayload && (
         <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-xs flex items-center justify-center p-2">
           <div className="scale-[0.78] origin-center">
             <AlertPopup

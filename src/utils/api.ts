@@ -12,6 +12,8 @@ import {
   GatewayStatsSnapshot,
   InstallUpdateResult,
   InterceptionAction,
+  InterceptionBehavior,
+  PopupPosition,
   ProfileSwitchResult,
   ProviderId,
   RiskReport,
@@ -29,7 +31,12 @@ let mockState: AppStateData = {
   warmup_started_at: null,
   synced_ai_timezone: null,
   auto_update_enabled: true,
+  interception_behavior: "ask_popup",
+  popup_position: "top_right",
+  custom_ai_domains: [],
 };
+
+let mockKillswitchStatus = false;
 
 export type MockScenario = "clean" | "turkey" | "ru";
 
@@ -641,14 +648,33 @@ export async function listClaudeProfiles(): Promise<ClaudeProfileListResponse> {
 
 export async function createClaudeProfile(
   name: string,
-  bindIp?: string | null,
-  bindCountry?: string | null
+  bindIpOrEmail?: string | null,
+  bindCountryOrIp?: string | boolean | null,
+  bindUpstreamKeyOrCurrentIp?: string | null,
+  bindUpstreamKeyParam?: string | null
 ): Promise<ClaudeProfileListResponse> {
+  let bindIp: string | null = null;
+  let bindCountry: string | null = null;
+  let upstreamKey: string | null = null;
+
+  if (typeof bindCountryOrIp === "boolean") {
+    // Called as: (name, emailOrLabel, bindCurrentIp, currentIp, bindUpstreamKey)
+    bindIp = bindCountryOrIp && bindUpstreamKeyOrCurrentIp ? bindUpstreamKeyOrCurrentIp : null;
+    bindCountry = null;
+    upstreamKey = bindUpstreamKeyParam || null;
+  } else {
+    // Called as: (name, bindIp, bindCountry, bindUpstreamKey)
+    bindIp = bindIpOrEmail || null;
+    bindCountry = bindCountryOrIp || null;
+    upstreamKey = bindUpstreamKeyOrCurrentIp || bindUpstreamKeyParam || null;
+  }
+
   if (isTauri()) {
     return await invoke<ClaudeProfileListResponse>("create_claude_profile_cmd", {
       name,
-      bindIp,
-      bindCountry,
+      bindIp: bindIp ?? null,
+      bindCountry: bindCountry ?? null,
+      bindUpstreamKey: upstreamKey ?? null,
     });
   }
   const newProfile: ClaudeProfile = {
@@ -656,7 +682,8 @@ export async function createClaudeProfile(
     name: name.trim(),
     bound_ip: bindIp || null,
     bound_country: bindCountry || null,
-    isolated_device_id: (crypto && crypto.randomUUID) ? crypto.randomUUID() : "iso-" + Math.random().toString(36).slice(2),
+    bound_upstream_key: upstreamKey || null,
+    isolated_device_id: (typeof crypto !== "undefined" && crypto.randomUUID) ? crypto.randomUUID() : "iso-" + Math.random().toString(36).slice(2),
     created_at: Math.floor(Date.now() / 1000),
     last_used_at: Math.floor(Date.now() / 1000),
     is_active: false,
@@ -690,6 +717,7 @@ export async function switchClaudeProfile(
     cleaned_cache_items: 7,
     restored_files: 5,
     pinned_ip_updated: activeProf.bound_ip || null,
+    bound_upstream_key_updated: activeProf.bound_upstream_key || null,
     message: `Очищено кэшей: 7, восстановлен изолированный Device ID: #${activeProf.isolated_device_id.slice(0, 8)}`,
   };
 }
@@ -719,14 +747,133 @@ export async function bindIpToClaudeProfile(
   if (isTauri()) {
     return await invoke<ClaudeProfileListResponse>("bind_ip_to_claude_profile_cmd", {
       profileId,
-      ip,
-      country,
+      bindIp: ip,
+      bindCountry: country ?? null,
     });
   }
   mockProfiles = mockProfiles.map((p) =>
     p.id === profileId ? { ...p, bound_ip: ip, bound_country: country || null } : p
   );
   return await listClaudeProfiles();
+}
+
+export async function bindUpstreamToClaudeProfile(
+  profileId: string,
+  upstreamKey: string | null
+): Promise<ClaudeProfileListResponse> {
+  if (isTauri()) {
+    return await invoke<ClaudeProfileListResponse>(
+      "bind_upstream_to_claude_profile_cmd",
+      {
+        profileId,
+        upstreamKey: upstreamKey || null,
+      }
+    );
+  }
+  mockProfiles = mockProfiles.map((p) =>
+    p.id === profileId ? { ...p, bound_upstream_key: upstreamKey || null } : p
+  );
+  return await listClaudeProfiles();
+}
+
+// -------------------------------------------------------------
+// v1.3.0: Interception Behavior, Popup Position & Custom AI Domains
+// -------------------------------------------------------------
+
+export async function setInterceptionBehavior(
+  behavior: InterceptionBehavior
+): Promise<InterceptionBehavior> {
+  if (isTauri()) {
+    await invoke("set_interception_behavior_cmd", { behavior });
+    return behavior;
+  }
+  mockState.interception_behavior = behavior;
+  return behavior;
+}
+
+export async function getInterceptionBehavior(): Promise<InterceptionBehavior> {
+  if (isTauri()) {
+    return await invoke<InterceptionBehavior>("get_interception_behavior_cmd");
+  }
+  return mockState.interception_behavior || "ask_popup";
+}
+
+export async function setPopupPosition(
+  position: PopupPosition
+): Promise<PopupPosition> {
+  if (isTauri()) {
+    await invoke("set_popup_position_cmd", { position });
+    return position;
+  }
+  mockState.popup_position = position;
+  return position;
+}
+
+export async function getPopupPosition(): Promise<PopupPosition> {
+  if (isTauri()) {
+    return await invoke<PopupPosition>("get_popup_position_cmd");
+  }
+  return mockState.popup_position || "top_right";
+}
+
+export async function getCustomAiDomains(): Promise<string[]> {
+  if (isTauri()) {
+    return await invoke<string[]>("get_custom_ai_domains_cmd");
+  }
+  return [...(mockState.custom_ai_domains || [])];
+}
+
+export async function addCustomAiDomain(domain: string): Promise<string[]> {
+  if (isTauri()) {
+    return await invoke<string[]>("add_custom_ai_domain_cmd", { domain });
+  }
+  const clean = domain.trim().toLowerCase();
+  const current = mockState.custom_ai_domains || [];
+  if (clean && !current.includes(clean)) {
+    mockState.custom_ai_domains = [...current, clean];
+  }
+  return [...(mockState.custom_ai_domains || [])];
+}
+
+export async function removeCustomAiDomain(domain: string): Promise<string[]> {
+  if (isTauri()) {
+    return await invoke<string[]>("remove_custom_ai_domain_cmd", { domain });
+  }
+  const clean = domain.trim().toLowerCase();
+  mockState.custom_ai_domains = (mockState.custom_ai_domains || []).filter(
+    (d) => d.toLowerCase() !== clean
+  );
+  return [...(mockState.custom_ai_domains || [])];
+}
+
+export async function forceCleanOsProxy(): Promise<string[]> {
+  if (isTauri()) {
+    return await invoke<string[]>("force_clean_os_proxy_cmd");
+  }
+  return [
+    "Системный прокси macOS/Windows очищен",
+    "Сетевые переменные окружения HTTP_PROXY/HTTPS_PROXY сброшены",
+    "Служебные DNS-записи восстановлены",
+  ];
+}
+
+export async function toggleNetworkKillswitch(
+  freeze?: boolean
+): Promise<boolean> {
+  if (isTauri()) {
+    return await invoke<boolean>("toggle_network_killswitch_cmd", {
+      freeze: freeze !== undefined ? freeze : null,
+    });
+  }
+  mockKillswitchStatus = freeze !== undefined ? freeze : !mockKillswitchStatus;
+  return mockKillswitchStatus;
+}
+
+export async function getNetworkKillswitchStatus(): Promise<boolean> {
+  if (isTauri()) {
+    return await invoke<boolean>("get_network_killswitch_status_cmd");
+  }
+  return mockKillswitchStatus;
 }
 
 // -------------------------------------------------------------

@@ -15,6 +15,7 @@ import {
   Zap,
   Clock,
   Sparkles,
+  AlertTriangle,
 } from "lucide-react";
 import { openExternal, openTelegramSupport } from "../utils/opener";
 import { openOsDatetimeSettings, syncAiAgentsTimezone } from "../utils/api";
@@ -129,6 +130,8 @@ const VPS_PROVIDERS: VpsProvider[] = [
   },
 ];
 
+export type VpnSetupMethod = "amnezia" | "vless_one_cmd" | "terminal" | "cascade";
+
 export const GuideViewer: React.FC<GuideViewerProps> = ({
   initialGuide = "01-personal-vpn-15min",
   currentIp = "185.212.102.40",
@@ -137,21 +140,46 @@ export const GuideViewer: React.FC<GuideViewerProps> = ({
   onToast,
 }) => {
   const [activeTab, setActiveTab] = useState<string>(() => {
-    if (initialGuide === "01-personal-vpn-amnezia" || initialGuide === "01-personal-vpn-15min") {
+    if (
+      initialGuide === "01-personal-vpn-amnezia" ||
+      initialGuide === "01-personal-vpn-15min" ||
+      initialGuide === "vless_one_cmd" ||
+      initialGuide === "cascade" ||
+      initialGuide === "terminal"
+    ) {
       return "01-personal-vpn-15min";
     }
     return initialGuide;
   });
-  const [guide1Mode, setGuide1Mode] = useState<"simple" | "advanced">("simple");
-  const [vpnMethod, setVpnMethod] = useState<"cascade" | "cdn" | "ipv6">("cascade");
+
+  const [vpnMethod, setVpnMethod] = useState<VpnSetupMethod>(() => {
+    if (initialGuide === "vless_one_cmd") return "vless_one_cmd";
+    if (initialGuide === "cascade") return "cascade";
+    if (initialGuide === "terminal") return "terminal";
+    return "amnezia";
+  });
+
+  const [cascadeWay, setCascadeWay] = useState<1 | 2 | 3>(1);
   const [copiedCode, setCopiedCode] = useState<string | null>(null);
   const [syncingTzGuide, setSyncingTzGuide] = useState<boolean>(false);
   const [tzGuideSynced, setTzGuideSynced] = useState<boolean>(false);
 
   useEffect(() => {
     if (initialGuide) {
-      if (initialGuide === "01-personal-vpn-amnezia" || initialGuide === "01-personal-vpn-15min") {
+      if (
+        initialGuide === "01-personal-vpn-amnezia" ||
+        initialGuide === "01-personal-vpn-15min"
+      ) {
         setActiveTab("01-personal-vpn-15min");
+      } else if (initialGuide === "vless_one_cmd") {
+        setActiveTab("01-personal-vpn-15min");
+        setVpnMethod("vless_one_cmd");
+      } else if (initialGuide === "cascade") {
+        setActiveTab("01-personal-vpn-15min");
+        setVpnMethod("cascade");
+      } else if (initialGuide === "terminal") {
+        setActiveTab("01-personal-vpn-15min");
+        setVpnMethod("terminal");
       } else {
         setActiveTab(initialGuide);
       }
@@ -287,35 +315,60 @@ export const GuideViewer: React.FC<GuideViewerProps> = ({
             </p>
           </div>
 
-          {/* Mode Switcher: Simple Amnezia (Default) vs Advanced Xray */}
-          <div className="grid grid-cols-2 gap-1 p-0.5 bg-[#12141A] rounded-lg border border-white/[0.08] text-[11px] font-sans">
+          {/* Method Selector: 4 Dedicated Tabs */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-1 p-0.5 bg-[#12141A] rounded-lg border border-white/[0.08] text-[11px] font-sans">
             <button
               type="button"
-              onClick={() => setGuide1Mode("simple")}
+              onClick={() => setVpnMethod("amnezia")}
               className={`py-1.5 px-2 rounded-md flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
-                guide1Mode === "simple"
+                vpnMethod === "amnezia"
                   ? "bg-emerald-500/20 border border-emerald-500/35 text-emerald-300 font-semibold shadow-sm"
                   : "text-zinc-400 hover:text-zinc-200 border border-transparent"
               }`}
             >
-              <Sparkles className="w-3.5 h-3.5 text-emerald-400" />
-              <span>Простой: Amnezia в 3 клика</span>
+              <Sparkles className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+              <span className="truncate">Amnezia (Без кода)</span>
             </button>
             <button
               type="button"
-              onClick={() => setGuide1Mode("advanced")}
+              onClick={() => setVpnMethod("vless_one_cmd")}
               className={`py-1.5 px-2 rounded-md flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
-                guide1Mode === "advanced"
+                vpnMethod === "vless_one_cmd"
+                  ? "bg-amber-500/20 border border-amber-500/35 text-amber-300 font-semibold shadow-sm"
+                  : "text-zinc-400 hover:text-zinc-200 border border-transparent"
+              }`}
+            >
+              <Zap className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+              <span className="truncate">VLESS в 1 команду</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setVpnMethod("terminal")}
+              className={`py-1.5 px-2 rounded-md flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+                vpnMethod === "terminal"
                   ? "bg-sky-500/20 border border-sky-500/35 text-sky-300 font-semibold shadow-sm"
                   : "text-zinc-400 hover:text-zinc-200 border border-transparent"
               }`}
             >
-              <Terminal className="w-3.5 h-3.5 text-sky-400" />
-              <span>Продвинутый: Xray Reality</span>
+              <Terminal className="w-3.5 h-3.5 text-sky-400 shrink-0" />
+              <span className="truncate">Терминал (WireGuard)</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setVpnMethod("cascade")}
+              className={`py-1.5 px-2 rounded-md flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+                vpnMethod === "cascade"
+                  ? "bg-purple-500/20 border border-purple-500/35 text-purple-300 font-semibold shadow-sm"
+                  : "text-zinc-400 hover:text-zinc-200 border border-transparent"
+              }`}
+            >
+              <ShieldCheck className="w-3.5 h-3.5 text-purple-400 shrink-0" />
+              <span className="truncate">Непробиваемый (3 способа)</span>
             </button>
           </div>
 
-          {guide1Mode === "simple" ? (
+          {/* TAB 1: Amnezia (Без кода) */}
+          {vpnMethod === "amnezia" && (
             <div className="space-y-2">
               {/* Card 1: Rental VPS */}
               <div className="bg-[#12141A] rounded-lg border border-white/[0.07] p-2.5 space-y-2">
@@ -451,8 +504,119 @@ export const GuideViewer: React.FC<GuideViewerProps> = ({
                   <span>Закрепить IP</span>
                 </button>
               </div>
+
+              {/* Compact helper button at bottom */}
+              <div className="p-2 rounded-lg bg-amber-500/10 border border-amber-500/20 flex items-center justify-between gap-2 font-sans">
+                <div className="flex items-center gap-1.5 text-[10.5px] text-zinc-300">
+                  <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                  <span>Не подключается рекомендованный сервер в Amnezia?</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setVpnMethod("vless_one_cmd")}
+                  className="px-2.5 py-1 rounded bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 font-semibold text-[10px] flex items-center gap-1 cursor-pointer transition-colors shrink-0"
+                >
+                  <span>Открыть вкладку «VLESS в 1 команду» →</span>
+                </button>
+              </div>
             </div>
-          ) : (
+          )}
+
+          {/* TAB 2: VLESS в 1 команду (Separate Tab) */}
+          {vpnMethod === "vless_one_cmd" && (
+            <div className="space-y-2 font-sans">
+              <div className="bg-[#12141A] rounded-lg border border-amber-500/25 p-2.5 space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-1.5 text-xs font-bold text-amber-300">
+                    <Zap className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                    <span>VLESS + XHTTP + TLS / Reality в 1 команду</span>
+                  </div>
+                  <span className="text-[9.5px] font-mono text-zinc-400">Ubuntu 22.04 / 24.04</span>
+                </div>
+                <p className="text-[10.5px] text-zinc-300 leading-relaxed">
+                  Используйте этот способ, если в Amnezia VPN не подключается рекомендованный сервер. Скрипт за 1 минуту поднимает на вашем VPS протокол <strong>VLESS Reality / XHTTP</strong> (маскировка под обычный сайт Microsoft/Apple), который работает в клиентах <strong>Throne, Hiddify, v2rayN, Streisand и Amnezia</strong>.
+                </p>
+
+                <div className="p-2 rounded bg-zinc-950/80 border border-white/[0.06] space-y-1.5">
+                  <div className="text-[10.5px] font-bold text-white">Шаг 1. Подключитесь к арендованному VPS по SSH</div>
+                  <div className="text-[10px] text-zinc-400">
+                    Откройте Терминал (macOS) или PowerShell (Windows), введите команду ниже со своим IP из письма хостинга и вставьте пароль <code className="text-zinc-200 font-mono">root</code>:
+                  </div>
+                  <div className="p-1.5 bg-black/60 rounded border border-white/[0.06] font-mono text-[10px] text-emerald-300 select-all">
+                    ssh root@ВАШ_IP_СЕРВЕРА
+                  </div>
+                </div>
+
+                <div className="p-2 rounded bg-zinc-950/80 border border-white/[0.06] space-y-2">
+                  <div className="text-[10.5px] font-bold text-white">Шаг 2. Скопируйте и запустите 1 команду установки</div>
+                  <div className="space-y-1">
+                    <div className="flex items-center justify-between text-[10px]">
+                      <span className="text-emerald-300 font-semibold">Вариант А (Без веб-панели — сразу выдаёт готовый ключ vless://):</span>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          copyCommand(
+                            "cmd-vless-xhttp-auto",
+                            "bash <(curl -fsSL https://raw.githubusercontent.com/zxcvos/Xray-script/main/install.sh)",
+                            "Авто-установщик VLESS + XHTTP + Reality"
+                          )
+                        }
+                        className="text-emerald-400 hover:text-emerald-300 font-mono flex items-center gap-1 cursor-pointer shrink-0"
+                      >
+                        {copiedCode === "cmd-vless-xhttp-auto" ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+                        <span>Копировать</span>
+                      </button>
+                    </div>
+                    <div className="p-1.5 bg-black/60 rounded border border-white/[0.06] font-mono text-[9.5px] text-zinc-200 select-all break-all">
+                      bash &lt;(curl -fsSL https://raw.githubusercontent.com/zxcvos/Xray-script/main/install.sh)
+                    </div>
+                  </div>
+
+                  <div className="space-y-1">
+                    <div className="flex items-center justify-between text-[10px]">
+                      <span className="text-sky-300 font-semibold">Вариант Б (Панель 3X-UI в браузере с QR-кодами для ПК и телефона):</span>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          copyCommand(
+                            "cmd-3xui-vless",
+                            "bash <(curl -Ls https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh)",
+                            "Установка панели 3X-UI"
+                          )
+                        }
+                        className="text-emerald-400 hover:text-emerald-300 font-mono flex items-center gap-1 cursor-pointer shrink-0"
+                      >
+                        {copiedCode === "cmd-3xui-vless" ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+                        <span>Копировать</span>
+                      </button>
+                    </div>
+                    <div className="p-1.5 bg-black/60 rounded border border-white/[0.06] font-mono text-[9.5px] text-zinc-200 select-all break-all">
+                      bash &lt;(curl -Ls https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh)
+                    </div>
+                  </div>
+                </div>
+
+                <div className="p-2 rounded bg-zinc-950/80 border border-white/[0.06] flex items-center justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="text-[10.5px] font-bold text-white">Шаг 3. Вставьте ключ vless:// в клиент и закрепите IP</div>
+                    <div className="text-[10px] text-zinc-400">
+                      Добавьте ссылку из буфера в <strong>Throne / Hiddify / v2rayN / Streisand</strong> и нажмите «Закрепить IP» ({currentIp}).
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => onPinIp && onPinIp(currentIp)}
+                    className="py-1.5 px-2.5 rounded-md bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-sans text-[10.5px] font-bold flex items-center gap-1 shrink-0 cursor-pointer"
+                  >
+                    <Pin className="w-3.5 h-3.5" />
+                    <span>Закрепить IP</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {vpnMethod !== "amnezia" && vpnMethod !== "vless_one_cmd" && (
             <>
           {/* Native Partner Comparison Cards */}
           <div className="space-y-1.5">
@@ -549,56 +713,78 @@ export const GuideViewer: React.FC<GuideViewerProps> = ({
             <div className="flex items-center justify-between gap-2">
               <div className="flex items-center gap-1.5 text-xs font-semibold text-zinc-100 font-sans">
                 <Terminal className="w-3.5 h-3.5 text-emerald-400" strokeWidth={1.75} />
-                <span>Шаг 2. Настройка непробиваемого Xray (3 метода)</span>
+                <span>Шаг 2. Выберите один из 3 непробиваемых способов</span>
               </div>
               <span className="text-[9.5px] font-mono text-zinc-500">Ubuntu 22.04 / 24.04</span>
+            </div>
+
+            {/* Plain-Russian Guide: Which of the 3 methods to choose */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-1.5 text-[10px] font-sans">
+              <div className="p-2 rounded bg-zinc-950/70 border border-white/[0.06] space-y-0.5">
+                <div className="font-bold text-emerald-300">Способ 1. Каскад / Xray</div>
+                <div className="text-zinc-400 leading-snug">
+                  Подходит в 90% случаев. Ставит VLESS Reality на 1 зарубежный сервер или связывает сервер в РФ с Европой.
+                </div>
+              </div>
+              <div className="p-2 rounded bg-zinc-950/70 border border-white/[0.06] space-y-0.5">
+                <div className="font-bold text-sky-300">Способ 2. CDN + XHTTP</div>
+                <div className="text-zinc-400 leading-snug">
+                  Если провайдер режет скорость или на мобильном интернете работают «белые списки» российских сайтов.
+                </div>
+              </div>
+              <div className="p-2 rounded bg-zinc-950/70 border border-white/[0.06] space-y-0.5">
+                <div className="font-bold text-purple-300">Способ 3. IPv6 + 3x-ui</div>
+                <div className="text-zinc-400 leading-snug">
+                  Если заблокирован IPv4-адрес вашего VPS: трафик пускается по протоколу IPv6, который ТСПУ почти не трогает.
+                </div>
+              </div>
             </div>
 
             {/* Method Selector */}
             <div className="grid grid-cols-3 gap-1 p-0.5 bg-zinc-950/70 rounded border border-white/[0.06] text-[10px]">
               <button
                 type="button"
-                onClick={() => setVpnMethod("cascade")}
+                onClick={() => setCascadeWay(1)}
                 className={`py-1 px-1.5 rounded font-medium transition-all cursor-pointer ${
-                  vpnMethod === "cascade"
+                  cascadeWay === 1
                     ? "bg-emerald-500/15 border border-emerald-500/30 text-emerald-300"
                     : "text-zinc-400 hover:text-zinc-200"
                 }`}
               >
-                1. Каскад / Xray
+                Способ 1: Каскад / Xray
               </button>
               <button
                 type="button"
-                onClick={() => setVpnMethod("cdn")}
+                onClick={() => setCascadeWay(2)}
                 className={`py-1 px-1.5 rounded font-medium transition-all cursor-pointer ${
-                  vpnMethod === "cdn"
+                  cascadeWay === 2
                     ? "bg-emerald-500/15 border border-emerald-500/30 text-emerald-300"
                     : "text-zinc-400 hover:text-zinc-200"
                 }`}
               >
-                2. CDN + XHTTP
+                Способ 2: CDN + XHTTP
               </button>
               <button
                 type="button"
-                onClick={() => setVpnMethod("ipv6")}
+                onClick={() => setCascadeWay(3)}
                 className={`py-1 px-1.5 rounded font-medium transition-all cursor-pointer ${
-                  vpnMethod === "ipv6"
+                  cascadeWay === 3
                     ? "bg-emerald-500/15 border border-emerald-500/30 text-emerald-300"
                     : "text-zinc-400 hover:text-zinc-200"
                 }`}
               >
-                3. IPv6 + 3x-ui
+                Способ 3: IPv6 + 3x-ui
               </button>
             </div>
 
-            {vpnMethod === "cascade" && (
+            {cascadeWay === 1 && (
               <div className="space-y-1.5 text-[10.5px] text-zinc-300 leading-snug">
                 <p className="text-zinc-400">
-                  <strong className="text-zinc-100">Голое ядро Xray + Каскад (РФ → Зарубежье):</strong> быстрая установка без тяжелых панелей. Можно использовать 1 зарубежный VPS или связать входной VPS в РФ (Timeweb) с выходным VPS в Европе/США (HostVDS / is*hosting).
+                  <strong className="text-zinc-100">Пошаговая инструкция (Способ 1):</strong> войдите на ваш зарубежный VPS по SSH (<code className="text-zinc-200 font-mono">ssh root@IP</code>) и выполните команду №1. Если прямые зарубежные IP у вашего провайдера заблокированы — дополнительно арендуйте сервер в РФ (Timeweb) и выполните на нём команду №2.
                 </p>
                 <div className="space-y-1">
-                  <div className="flex items-center justify-between text-[10px] text-zinc-400">
-                    <span>1. Установка VLESS + Reality на сервер (или XHTTP):</span>
+                  <div className="flex items-center justify-between text-[10px] text-zinc-300 font-semibold">
+                    <span>Шаг 2.1. На зарубежном VPS — установка Xray VLESS Reality:</span>
                     <button
                       type="button"
                       onClick={() =>
@@ -620,8 +806,8 @@ export const GuideViewer: React.FC<GuideViewerProps> = ({
                 </div>
 
                 <div className="space-y-1">
-                  <div className="flex items-center justify-between text-[10px] text-zinc-400">
-                    <span>2. На входном VPS в РФ — скрипт связки в каскад:</span>
+                  <div className="flex items-center justify-between text-[10px] text-zinc-300 font-semibold">
+                    <span>Шаг 2.2 (Необязательно). На сервере в РФ — связка в каскадный мост:</span>
                     <button
                       type="button"
                       onClick={() =>
@@ -642,15 +828,15 @@ export const GuideViewer: React.FC<GuideViewerProps> = ({
                   </div>
                 </div>
                 <div className="text-[10px] text-zinc-400">
-                  Команды управления ключами в терминале: <code className="text-emerald-300 font-mono">mainuser</code>, <code className="text-emerald-300 font-mono">newuser</code>, <code className="text-emerald-300 font-mono">userlist</code>, <code className="text-emerald-300 font-mono">sharelink</code>, <code className="text-emerald-300 font-mono">rmuser</code>.
+                  <strong>Шаг 2.3. Получение ключа:</strong> введите в терминале <code className="text-emerald-300 font-mono">sharelink</code> (или <code className="text-emerald-300 font-mono">newuser</code>), скопируйте ссылку <code className="text-emerald-300 font-mono">vless://...</code> и вставьте её в клиент <strong>Throne, Hiddify, v2rayN</strong> или <strong>Streisand</strong>.
                 </div>
               </div>
             )}
 
-            {vpnMethod === "cdn" && (
+            {cascadeWay === 2 && (
               <div className="space-y-1.5 text-[10.5px] text-zinc-300 leading-snug">
                 <p className="text-zinc-400">
-                  <strong className="text-zinc-100">VLESS + XHTTP через российский CDN:</strong> обход жестких блокировок и «белых списков» мобильных операторов через Yandex Cloud CDN / EdgeCenter.
+                  <strong className="text-zinc-100">Пошаговая инструкция (Способ 2 — XHTTP через CDN):</strong> обход жестких блокировок и «белых списков» мобильных операторов через Yandex Cloud CDN / EdgeCenter.
                 </p>
                 <ol className="list-decimal list-inside space-y-1 text-[10px] text-zinc-300">
                   <li>
@@ -667,7 +853,7 @@ export const GuideViewer: React.FC<GuideViewerProps> = ({
               </div>
             )}
 
-            {vpnMethod === "ipv6" && (
+            {cascadeWay === 3 && (
               <div className="space-y-1.5 text-[10.5px] text-zinc-300 leading-snug">
                 <p className="text-zinc-400">
                   <strong className="text-zinc-100">Оживление заблокированных серверов через IPv6:</strong> ТСПУ блокирует IPv4-адреса, но почти не трогает подсети <code className="text-zinc-100 font-mono">IPv6 (/64)</code>.

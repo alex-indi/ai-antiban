@@ -9,6 +9,8 @@ pub struct ClaudeProfile {
     pub name: String,
     pub bound_ip: Option<String>,
     pub bound_country: Option<String>,
+    #[serde(default)]
+    pub bound_upstream_key: Option<String>,
     pub isolated_device_id: String,
     pub created_at: u64,
     pub last_used_at: u64,
@@ -31,6 +33,7 @@ pub struct ProfileSwitchResult {
     pub cleaned_cache_items: usize,
     pub restored_files: usize,
     pub pinned_ip_updated: Option<String>,
+    pub bound_upstream_key_updated: Option<String>,
     pub message: String,
 }
 
@@ -122,6 +125,7 @@ fn load_or_init_storage_in(
         name: "Основной аккаунт".to_string(),
         bound_ip: current_pinned_ip.map(|s| s.to_string()),
         bound_country: None,
+        bound_upstream_key: None,
         isolated_device_id: device_id,
         created_at: now,
         last_used_at: now,
@@ -389,6 +393,7 @@ pub fn create_claude_profile_in(
     name: &str,
     bind_ip: Option<String>,
     bind_country: Option<String>,
+    bind_upstream_key: Option<String>,
 ) -> Result<ClaudeProfileListResponse, String> {
     let mut storage = load_or_init_storage_in(storage_dir, claude_dir, None)?;
     let new_id = format!("profile-{}", &Uuid::new_v4().to_string()[..8]);
@@ -400,6 +405,7 @@ pub fn create_claude_profile_in(
         name: name.trim().to_string(),
         bound_ip: bind_ip,
         bound_country: bind_country,
+        bound_upstream_key: bind_upstream_key,
         isolated_device_id: device_id,
         created_at: now,
         last_used_at: now,
@@ -469,6 +475,7 @@ pub fn switch_claude_profile_in(
     Ok(ProfileSwitchResult {
         previous_profile_id: prev_id,
         pinned_ip_updated: active_profile.bound_ip.clone(),
+        bound_upstream_key_updated: active_profile.bound_upstream_key.clone(),
         active_profile: active_profile.clone(),
         cleaned_cache_items,
         restored_files,
@@ -531,6 +538,25 @@ pub fn update_profile_bound_ip_in(
     build_list_response(storage_dir, claude_dir, &storage)
 }
 
+pub fn update_profile_bound_upstream_in(
+    storage_dir: &Path,
+    claude_dir: &Path,
+    profile_id: &str,
+    upstream_key: Option<String>,
+) -> Result<ClaudeProfileListResponse, String> {
+    let mut storage = load_or_init_storage_in(storage_dir, claude_dir, None)?;
+    let p = storage
+        .profiles
+        .iter_mut()
+        .find(|p| p.id == profile_id)
+        .ok_or_else(|| format!("Профиль «{profile_id}» не найден."))?;
+
+    p.bound_upstream_key = upstream_key;
+
+    save_storage_in(storage_dir, &storage)?;
+    build_list_response(storage_dir, claude_dir, &storage)
+}
+
 // -----------------------------------------------------------------------------
 // Public Environment-Aware Wrappers
 // -----------------------------------------------------------------------------
@@ -545,10 +571,11 @@ pub fn create_claude_profile(
     name: &str,
     bind_ip: Option<String>,
     bind_country: Option<String>,
+    bind_upstream_key: Option<String>,
 ) -> Result<ClaudeProfileListResponse, String> {
     let storage_dir = default_profiles_storage_dir();
     let claude_dir = default_claude_desktop_dir().unwrap_or_else(|| PathBuf::from("mock_claude"));
-    create_claude_profile_in(&storage_dir, &claude_dir, name, bind_ip, bind_country)
+    create_claude_profile_in(&storage_dir, &claude_dir, name, bind_ip, bind_country, bind_upstream_key)
 }
 
 pub fn switch_claude_profile(target_id: &str) -> Result<ProfileSwitchResult, String> {
@@ -571,6 +598,15 @@ pub fn update_profile_bound_ip(
     let storage_dir = default_profiles_storage_dir();
     let claude_dir = default_claude_desktop_dir().unwrap_or_else(|| PathBuf::from("mock_claude"));
     update_profile_bound_ip_in(&storage_dir, &claude_dir, profile_id, bind_ip, bind_country)
+}
+
+pub fn update_profile_bound_upstream(
+    profile_id: &str,
+    upstream_key: Option<String>,
+) -> Result<ClaudeProfileListResponse, String> {
+    let storage_dir = default_profiles_storage_dir();
+    let claude_dir = default_claude_desktop_dir().unwrap_or_else(|| PathBuf::from("mock_claude"));
+    update_profile_bound_upstream_in(&storage_dir, &claude_dir, profile_id, upstream_key)
 }
 
 #[cfg(test)]
@@ -599,10 +635,12 @@ mod tests {
             "Рабочий Claude Pro",
             Some("195.12.34.56".to_string()),
             Some("NL".to_string()),
+            Some("socks5://proxy.example.com:1080".to_string()),
         )
         .unwrap();
         assert_eq!(resp2.profiles.len(), 2);
         assert_eq!(resp2.profiles[1].name, "Рабочий Claude Pro");
+        assert_eq!(resp2.profiles[1].bound_upstream_key.as_deref(), Some("socks5://proxy.example.com:1080"));
         assert_ne!(
             resp2.profiles[0].isolated_device_id,
             resp2.profiles[1].isolated_device_id
@@ -635,6 +673,7 @@ mod tests {
             "Резервный аккаунт",
             None,
             None,
+            Some("http://10.0.0.1:8080".to_string()),
         )
         .unwrap();
         let p2_id = resp.profiles[1].id.clone();
@@ -643,6 +682,7 @@ mod tests {
         let switch_res = switch_claude_profile_in(&storage_dir, &claude_dir, &p2_id).unwrap();
         assert_eq!(switch_res.previous_profile_id, "default");
         assert_eq!(switch_res.active_profile.id, p2_id);
+        assert_eq!(switch_res.bound_upstream_key_updated.as_deref(), Some("http://10.0.0.1:8080"));
 
         // Caches were cleaned
         assert!(!claude_dir.join("Cache").exists());
@@ -665,6 +705,7 @@ mod tests {
         // Switch back to default profile
         let switch_back = switch_claude_profile_in(&storage_dir, &claude_dir, "default").unwrap();
         assert_eq!(switch_back.active_profile.id, "default");
+        assert_eq!(switch_back.bound_upstream_key_updated, None);
         assert!(claude_dir.join("Cookies").exists());
         assert_eq!(
             fs::read_to_string(claude_dir.join("Cookies")).unwrap(),
@@ -684,7 +725,7 @@ mod tests {
         assert!(del_err.is_err());
 
         // Add second profile and delete it
-        let resp = create_claude_profile_in(&storage_dir, &claude_dir, "Temporary", None, None).unwrap();
+        let resp = create_claude_profile_in(&storage_dir, &claude_dir, "Temporary", None, None, None).unwrap();
         let p2_id = resp.profiles[1].id.clone();
         let after_del = delete_claude_profile_in(&storage_dir, &claude_dir, &p2_id).unwrap();
         assert_eq!(after_del.profiles.len(), 1);
@@ -708,5 +749,17 @@ mod tests {
 
         assert_eq!(updated.profiles[0].bound_ip.as_deref(), Some("104.28.19.2"));
         assert_eq!(updated.profiles[0].bound_country.as_deref(), Some("US"));
+
+        let updated_upstream = update_profile_bound_upstream_in(
+            &storage_dir,
+            &claude_dir,
+            "default",
+            Some("socks5://127.0.0.1:1080".to_string()),
+        )
+        .unwrap();
+        assert_eq!(
+            updated_upstream.profiles[0].bound_upstream_key.as_deref(),
+            Some("socks5://127.0.0.1:1080")
+        );
     }
 }

@@ -68,3 +68,18 @@ wget -qO- https://raw.githubusercontent.com/ServerTechnologies/cascade-for-x-ray
 bash <(curl -Ls https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh)
 ```
 В Inbound укажите `Listen: [::]` и подключайтесь к `[IPv6_СЕРВЕРА]:443` напрямую или через Dual-Stack каскад из РФ.
+
+---
+
+## ⚡ Альтернатива: VLESS + XHTTP + TLS / Reality в 1 команду
+
+Если у вас не подключается рекомендованный сервер в Amnezia или провайдер блокирует стандартные порты, этот скрипт за 1 минуту поднимает на вашем VPS неубиваемый протокол VLESS + XHTTP + TLS (Reality), который маскируется под обычный сайт и работает в клиентах Throne, Hiddify, v2rayN, Streisand и AmneziaVPN:
+
+1. **Авто-установщик VLESS + XHTTP + TLS / Reality (1 команда без панели):**
+   ```bash
+   bash <(curl -fsSL https://raw.githubusercontent.com/zxcvos/Xray-script/main/install.sh)
+   ```
+2. **Панель 3X-UI (VLESS-XHTTP-TLS и Reality с веб-интерфейсом и QR-кодами):**
+   ```bash
+   bash <(curl -Ls https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh)
+   ```

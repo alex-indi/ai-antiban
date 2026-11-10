@@ -13,7 +13,7 @@ use crate::proxy::guard::{gate_closed, wait_open, Gate, NetworkGuard};
 use crate::proxy::hold_queue::{
     HoldQueue, HoldResolution, RiskInterceptPayload, DEFAULT_HOLD_TTL_SECS,
 };
-use crate::proxy::pac::{generate_pac_script, get_all_ai_domains};
+use crate::proxy::pac::generate_pac_script;
 use crate::state::{AppState, IpHistoryEntry};
 
 pub const DEFAULT_PROXY_PORT: u16 = 8899;
@@ -166,7 +166,8 @@ impl ProxyServer {
 
     async fn handle_pac_request(&self, client: &mut TcpStream) -> Result<(), std::io::Error> {
         let matrix = self.auditor.rules.provider_matrix.read().await;
-        let domains = get_all_ai_domains(&matrix);
+        let custom_domains = self.state.get_custom_ai_domains().await;
+        let domains = crate::proxy::pac::get_all_ai_domains_with_custom(&matrix, &custom_domains);
         let pac_script = generate_pac_script(&domains, &self.bound_addr.to_string());
 
         let response = format!(
@@ -192,7 +193,8 @@ impl ProxyServer {
         }
 
         let is_canary = host == "canary-test.anthropic.zastava.local";
-        let provider_opt = ProviderId::from_host(&host);
+        let custom_domains = self.state.get_custom_ai_domains().await;
+        let provider_opt = ProviderId::from_host_with_custom(&host, &custom_domains);
 
         let provider = match provider_opt {
             Some(p) => p,
@@ -297,7 +299,38 @@ impl ProxyServer {
             return send_canary_intercepted(client).await;
         }
 
-        // Step 5: If verdict is Yellow or Red -> HOLD connection and alert UI
+        // Step 5: If verdict is Yellow or Red -> check preset InterceptionBehavior
+        match self.state.get_interception_behavior().await {
+            crate::state::InterceptionBehavior::AutoLockSilent => {
+                self.state.stats().record_intercepted(&host, provider.as_str(), "BLOCKED", &report.telemetry.country_code);
+                let _ = self.state.block_provider(provider.as_str()).await;
+                return send_forbidden(client, "Auto-locked by Zastava silent rule").await;
+            }
+            crate::state::InterceptionBehavior::AutoAllowTrusted => {
+                let matrix = self.auditor.rules.provider_matrix.read().await;
+                let cc = report.telemetry.country_code.trim().to_uppercase();
+                let is_sanctioned = matrix.global_blocked_countries.iter().any(|b| b.eq_ignore_ascii_case(&cc));
+                if !is_sanctioned {
+                    let entry = IpHistoryEntry::new(
+                        report.telemetry.ip.clone(),
+                        report.telemetry.country_code.clone(),
+                        report.telemetry.asn,
+                        report.telemetry.resolved_at,
+                    );
+                    let _ = self.state.record_ip_history(provider.as_str(), entry).await;
+                    self.state.stats().record_protected(&host, provider.as_str(), &report.telemetry.country_code);
+                    return self.tunnel_to_target(client, &host, port, true).await;
+                } else {
+                    self.state.stats().record_intercepted(&host, provider.as_str(), "BLOCKED", &report.telemetry.country_code);
+                    let _ = self.state.block_provider(provider.as_str()).await;
+                    return send_forbidden(client, "Auto-locked by Zastava silent rule (sanctioned country)").await;
+                }
+            }
+            crate::state::InterceptionBehavior::AskPopup => {
+                // proceed with hold_queue and show_and_position_alert_popup
+            }
+        }
+
         self.state.stats().record_intercepted(&host, provider.as_str(), "HELD", &report.telemetry.country_code);
         let hold_id = Uuid::new_v4().to_string();
         let rx = self.hold_queue.register(hold_id.clone(), provider.as_str()).await;
@@ -371,8 +404,13 @@ impl ProxyServer {
             ));
         }
 
+        let host_is_raw_ip = host.parse::<IpAddr>().is_ok();
         for addr in &addrs {
             if is_forbidden_ip(&addr.ip()) {
+                if !host_is_raw_ip && is_tun_fake_ip(&addr.ip()) {
+                    // Allowed: DNS resolved to a TUN FakeIP pool (198.18.0.0/15) used by sing-box/Throne/Nekoray/Hiddify
+                    continue;
+                }
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::PermissionDenied,
                     "SSRF Protection: resolved IP belongs to a restricted local or private network.",
@@ -596,6 +634,25 @@ pub fn is_forbidden_ip(ip: &IpAddr) -> bool {
                 || (seg0 & 0xfe00) == 0xfc00
                 // Link-Local unicast (fe80::/10)
                 || (seg0 & 0xffc0) == 0xfe80
+        }
+    }
+}
+
+/// Returns true if the IP belongs to the benchmarking / TUN FakeIP network range (`198.18.0.0/15`).
+/// Used by VPN / TUN software such as sing-box, Throne, Nekoray, Hiddify, Clash in FakeIP mode.
+pub fn is_tun_fake_ip(ip: &IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            let octets = v4.octets();
+            octets[0] == 198 && (octets[1] == 18 || octets[1] == 19)
+        }
+        IpAddr::V6(v6) => {
+            if let Some(mapped_v4) = v6.to_ipv4_mapped() {
+                let octets = mapped_v4.octets();
+                octets[0] == 198 && (octets[1] == 18 || octets[1] == 19)
+            } else {
+                false
+            }
         }
     }
 }

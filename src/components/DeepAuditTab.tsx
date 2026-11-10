@@ -70,13 +70,16 @@ export const DeepAuditTab: React.FC<DeepAuditTabProps> = ({
 
   const locCheckResult: CheckResult =
     report.checks?.find(
-      (c) => c.code.includes("LOCATION") || c.code.includes("WIFI")
+      (c) =>
+        c.code.includes("LOCATION") ||
+        c.code.includes("WIFI") ||
+        c.code === "location_services"
     ) ||
     report.checks?.[8] || {
       status: "ok",
       code: "OS_LOCATION_SAFE",
       message:
-        "Защита Wi-Fi BSSID активна: службы геолокации не передают MAC-адреса роутеров.",
+        "Геолокация Windows отключена. Утечек по Wi-Fi (BSSID) нет.",
       guide_ref: "03-os-privacy-setup",
     };
 
@@ -202,7 +205,10 @@ export const DeepAuditTab: React.FC<DeepAuditTabProps> = ({
       name: "Геолокация по Wi-Fi в ОС",
       result: locCheckResult,
       detail: locCheckResult.message,
-      metricTag: locCheckResult.status === "ok" ? "СКРЫТО" : "ОТКРЫТО",
+      metricTag:
+        locCheckResult.status === "ok" || locCheckResult.status === "green"
+          ? "ЗАЩИЩЕНО"
+          : "ОТКРЫТО",
     },
     {
       id: "reverse_dns",
@@ -276,7 +282,10 @@ export const DeepAuditTab: React.FC<DeepAuditTabProps> = ({
             <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" strokeWidth={1.75} />
           );
 
-          if (status === "critical" || status === "red") {
+          if (item.id === "wifi_geo" && (status === "ok" || status === "green")) {
+            badgeText = "ЗАЩИЩЕНО";
+            badgeClass = "bg-emerald-500/15 text-emerald-300 border-emerald-500/35 font-semibold";
+          } else if (status === "critical" || status === "red") {
             badgeText = "БЛОК";
             badgeClass = "bg-rose-500/15 text-rose-400 border-rose-500/30";
             icon = (
