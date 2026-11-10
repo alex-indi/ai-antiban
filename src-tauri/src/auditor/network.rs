@@ -7,7 +7,7 @@ use crate::auditor::geo_matrix::CheckResult;
 use crate::state::UpstreamProxyConfig;
 
 pub const CACHE_TTL_SECONDS: u64 = 15;
-pub const REQUEST_TIMEOUT_MS: u64 = 1500;
+pub const REQUEST_TIMEOUT_MS: u64 = 3500;
 
 pub const SUSPICIOUS_ANONYMIZER_MARKERS: &[&str] = &[
     "tor-exit",
@@ -38,6 +38,10 @@ impl NetworkTelemetry {
     pub fn is_fresh(&self, ttl_seconds: u64) -> bool {
         let now = current_timestamp();
         now.saturating_sub(self.resolved_at) < ttl_seconds
+    }
+
+    pub fn has_provider_metadata(&self) -> bool {
+        self.asn.is_some() || self.isp.is_some() || self.org.is_some()
     }
 }
 
@@ -100,10 +104,22 @@ struct IpInfoResponse {
     timezone: Option<String>,
 }
 
+// Models for freeipapi.com
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FreeIpApiResponse {
+    ip_address: Option<String>,
+    country_code: Option<String>,
+    asn: Option<String>,
+    asn_organization: Option<String>,
+    time_zones: Option<Vec<String>>,
+}
+
 #[derive(Clone)]
 pub struct NetworkResolver {
     client: reqwest::Client,
     cache: Arc<RwLock<Option<(Option<String>, NetworkTelemetry)>>>,
+    resolve_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl Default for NetworkResolver {
@@ -126,6 +142,7 @@ impl NetworkResolver {
         Self {
             client,
             cache: Arc::new(RwLock::new(None)),
+            resolve_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -168,7 +185,40 @@ impl NetworkResolver {
                     (None, None) => true,
                     _ => false,
                 };
-                if key_matches && telemetry.is_fresh(CACHE_TTL_SECONDS) {
+                let effective_ttl = if telemetry.has_provider_metadata() {
+                    CACHE_TTL_SECONDS
+                } else {
+                    2
+                };
+                if key_matches && telemetry.is_fresh(effective_ttl) {
+                    return Ok(telemetry.clone());
+                }
+            }
+        }
+
+        // Coalesce concurrent cold-start / multi-provider probes so we don't fire 4 simultaneous
+        // requests to ipwho.is / ipinfo.io and trigger rate limits or timeouts on startup.
+        let _guard = self.resolve_lock.lock().await;
+
+        {
+            let r = self.cache.read().await;
+            if let Some((cached_key, telemetry)) = &*r {
+                let key_matches = match (&current_key, cached_key) {
+                    (Some(k1), Some(k2)) => k1 == k2,
+                    (None, None) => true,
+                    _ => false,
+                };
+                let effective_ttl = if force_refresh {
+                    2
+                } else if telemetry.has_provider_metadata() {
+                    CACHE_TTL_SECONDS
+                } else {
+                    2
+                };
+                if key_matches
+                    && telemetry.is_fresh(effective_ttl)
+                    && (!force_refresh || telemetry.has_provider_metadata())
+                {
                     return Ok(telemetry.clone());
                 }
             }
@@ -210,7 +260,13 @@ impl NetworkResolver {
             Err(e) => errors.push(format!("ipinfo.io failed: {e}")),
         }
 
-        // 3. Fallback 2: 1.1.1.1/cdn-cgi/trace
+        // 3. Fallback 2: freeipapi.com (rich metadata with ASN/ISP/Timezone)
+        match self.query_freeipapi(client).await {
+            Ok(t) => return Ok(t),
+            Err(e) => errors.push(format!("freeipapi.com failed: {e}")),
+        }
+
+        // 4. Fallback 3: 1.1.1.1/cdn-cgi/trace
         match self.query_cloudflare_trace(client).await {
             Ok(t) => return Ok(t),
             Err(e) => errors.push(format!("1.1.1.1/cdn-cgi/trace failed: {e}")),
@@ -295,6 +351,43 @@ impl NetworkResolver {
             org: org_name.clone(),
             isp: org_name,
             timezone: parsed.timezone,
+            resolved_at: current_timestamp(),
+        })
+    }
+
+    async fn query_freeipapi(&self, client: &reqwest::Client) -> Result<NetworkTelemetry, String> {
+        let resp = client
+            .get("https://freeipapi.com/api/json")
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let parsed: FreeIpApiResponse = resp.json().await.map_err(|e| e.to_string())?;
+
+        let ip = parsed.ip_address.ok_or("freeipapi.com missing 'ipAddress'")?;
+        let country_code = parsed
+            .country_code
+            .ok_or("freeipapi.com missing 'countryCode'")?
+            .to_uppercase();
+
+        let asn = parsed.asn.and_then(|s| {
+            let trimmed = s.trim();
+            let digits = trimmed.strip_prefix("AS").unwrap_or(trimmed);
+            digits.parse::<u32>().ok()
+        });
+        let org = parsed.asn_organization;
+        let timezone = parsed
+            .time_zones
+            .and_then(|mut v| if v.is_empty() { None } else { Some(v.remove(0)) });
+
+        Ok(NetworkTelemetry {
+            ip,
+            country_code,
+            hostname: None,
+            asn,
+            org: org.clone(),
+            isp: org,
+            timezone,
             resolved_at: current_timestamp(),
         })
     }
@@ -569,5 +662,26 @@ mod tests {
         let clean_res = evaluate_dns_country_consistency(&tel, Some("NL"));
         assert_eq!(clean_res.status, crate::auditor::geo_matrix::CheckStatus::Ok);
         assert_eq!(clean_res.code, "DNS_COUNTRY_CONSISTENT");
+    }
+
+    #[test]
+    fn test_has_provider_metadata() {
+        let bare = NetworkTelemetry {
+            ip: "185.10.10.1".to_string(),
+            country_code: "NL".to_string(),
+            hostname: None,
+            asn: None,
+            org: None,
+            isp: None,
+            timezone: None,
+            resolved_at: current_timestamp(),
+        };
+        assert!(!bare.has_provider_metadata());
+
+        let rich = NetworkTelemetry {
+            asn: Some(20473),
+            ..bare
+        };
+        assert!(rich.has_provider_metadata());
     }
 }

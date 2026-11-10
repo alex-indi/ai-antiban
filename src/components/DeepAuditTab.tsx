@@ -166,8 +166,12 @@ export const DeepAuditTab: React.FC<DeepAuditTabProps> = ({
         ? `AS${telemetry.asn} · ${
             telemetry.isp || telemetry.org || "Хостинг"
           }`
+        : telemetry.isp || telemetry.org
+        ? `${telemetry.isp || telemetry.org}`
+        : telemetry.ip
+        ? `Узел ${telemetry.country_code} (${telemetry.ip})`
         : "Провайдер не определен",
-      metricTag: telemetry.asn ? `AS${telemetry.asn}` : "--",
+      metricTag: telemetry.asn ? `AS${telemetry.asn}` : telemetry.country_code || "--",
     },
     {
       id: "ipv6",

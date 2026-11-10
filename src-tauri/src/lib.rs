@@ -1027,6 +1027,7 @@ pub fn run() {
             // Register panic guard and OS termination signal watcher for systemic proxy clean-up
             sysproxy::register_clean_exit_guard();
             sysproxy::spawn_signal_cleanup_watcher();
+            sysproxy::cleanup_legacy_windows_user_env();
 
             // Ensure alert-popup has no shadow/decorations and stays borderless
             if let Some(popup) = app.get_webview_window("alert-popup") {
@@ -1434,6 +1435,7 @@ pub fn run() {
                             let _ = win.show();
                             let _ = win.set_focus();
                         }
+                        let _ = app.emit("tray://sync-tz", ());
                         let _ = app.emit("tray://sync-timezone", ());
                     }
                     "pin_ip" => {
@@ -1558,6 +1560,7 @@ pub fn run() {
             let watcher_state = app_state.clone();
             let watcher_guard = guard_for_watcher;
             tauri::async_runtime::spawn(async move {
+                let mut initial_synced = false;
                 loop {
                     if let Ok(report) = watcher_auditor
                         .evaluate_all(auditor::ProviderId::Anthropic, &watcher_state, false)
@@ -1573,8 +1576,17 @@ pub fn run() {
                             || watcher_guard.gate() != proxy::Gate::Open;
 
                         update_tray_from_report(&watcher_handle, &report, is_pinned, has_blocked);
+
+                        if !initial_synced {
+                            initial_synced = true;
+                            let _ = watcher_handle.emit("network://changed", &report);
+                        }
+                        tokio::time::sleep(Duration::from_secs(10)).await;
+                    } else if !initial_synced {
+                        tokio::time::sleep(Duration::from_millis(1200)).await;
+                    } else {
+                        tokio::time::sleep(Duration::from_secs(10)).await;
                     }
-                    tokio::time::sleep(Duration::from_secs(10)).await;
                 }
             });
 

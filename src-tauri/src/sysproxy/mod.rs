@@ -140,23 +140,7 @@ pub fn disable_all_sysproxy() {
 
     // Always clean up CLI, shell, PowerShell, IDE settings, and OS environment
     disable_cli_protection();
-
-    #[cfg(target_os = "windows")]
-    {
-        for var_name in [
-            "HTTP_PROXY",
-            "HTTPS_PROXY",
-            "ALL_PROXY",
-            "NO_PROXY",
-            "http_proxy",
-            "https_proxy",
-            "all_proxy",
-            "no_proxy",
-        ] {
-            let _ = delete_windows_user_env_var(var_name);
-        }
-        broadcast_windows_env_change();
-    }
+    cleanup_legacy_windows_user_env();
 
     SYS_PROXY_ACTIVE.store(false, Ordering::SeqCst);
     if let Ok(mut g) = LAST_PAC_URL.lock() {
@@ -468,7 +452,7 @@ pub fn build_powershell_guard_block_with_tz(
     }
 
     format!(
-        "{start}\n$__zastavaUp = $false\ntry {{\n  $__zastavaUp = [bool]([System.Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners() | Where-Object {{ $_.Port -eq {port} }})\n}} catch {{}}\nif ($__zastavaUp) {{\n  $env:HTTP_PROXY = \"{url}\"\n  $env:HTTPS_PROXY = \"{url}\"\n  $env:ALL_PROXY = \"{url}\"\n  $env:http_proxy = \"{url}\"\n  $env:https_proxy = \"{url}\"\n  $env:all_proxy = \"{url}\"\n  $env:NO_PROXY = \"{no_proxy}\"\n  $env:no_proxy = \"{no_proxy}\"\n  $env:LANG = \"en_US.UTF-8\"\n  $env:LC_TIME = \"en_US.UTF-8\"\n  $env:LC_ALL = \"en_US.UTF-8\"{tz_assignment}\n}} else {{\n  Remove-Item Env:HTTP_PROXY,Env:HTTPS_PROXY,Env:ALL_PROXY,Env:http_proxy,Env:https_proxy,Env:all_proxy -ErrorAction SilentlyContinue\n}}\n{end}",
+        "{start}\n$__zastavaUp = $false\ntry {{\n  $__zastavaUp = [bool]([System.Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners() | Where-Object {{ $_.Port -eq {port} }})\n}} catch {{}}\nif ($__zastavaUp) {{\n  $env:HTTP_PROXY = \"{url}\"\n  $env:HTTPS_PROXY = \"{url}\"\n  $env:ALL_PROXY = \"{url}\"\n  $env:http_proxy = \"{url}\"\n  $env:https_proxy = \"{url}\"\n  $env:all_proxy = \"{url}\"\n  $env:NO_PROXY = \"{no_proxy}\"\n  $env:no_proxy = \"{no_proxy}\"\n  $env:LANG = \"en_US.UTF-8\"\n  $env:LC_TIME = \"en_US.UTF-8\"\n  $env:LC_ALL = \"en_US.UTF-8\"{tz_assignment}\n}} else {{\n  Remove-Item Env:HTTP_PROXY,Env:HTTPS_PROXY,Env:ALL_PROXY,Env:http_proxy,Env:https_proxy,Env:all_proxy,Env:TZ,Env:LANG,Env:LC_TIME,Env:LC_ALL -ErrorAction SilentlyContinue\n}}\n{end}",
         start = ZASTAVA_RC_START,
         port = port,
         url = url,
@@ -550,22 +534,68 @@ pub fn broadcast_windows_env_change() {
             uTimeout: u32,
             lpdwResult: *mut usize,
         ) -> isize;
+        fn SendMessageTimeoutA(
+            hWnd: *mut core::ffi::c_void,
+            Msg: u32,
+            wParam: usize,
+            lParam: *const u8,
+            fuFlags: u32,
+            uTimeout: u32,
+            lpdwResult: *mut usize,
+        ) -> isize;
     }
     const HWND_BROADCAST: *mut core::ffi::c_void = 0xffff as *mut core::ffi::c_void;
     const WM_SETTINGCHANGE: u32 = 0x001A;
     const SMTO_ABORTIFHUNG: u32 = 0x0002;
-    let env_str: Vec<u16> = "Environment\0".encode_utf16().collect();
+    let env_wide: Vec<u16> = "Environment\0".encode_utf16().collect();
+    let env_ansi: &[u8] = b"Environment\0";
     let mut dw_result: usize = 0;
     unsafe {
         let _ = SendMessageTimeoutW(
             HWND_BROADCAST,
             WM_SETTINGCHANGE,
             0,
-            env_str.as_ptr(),
+            env_wide.as_ptr(),
             SMTO_ABORTIFHUNG,
-            1000,
+            2000,
             &mut dw_result,
         );
+        let _ = SendMessageTimeoutA(
+            HWND_BROADCAST,
+            WM_SETTINGCHANGE,
+            0,
+            env_ansi.as_ptr(),
+            SMTO_ABORTIFHUNG,
+            2000,
+            &mut dw_result,
+        );
+    }
+}
+
+/// Unconditionally deletes any legacy proxy, timezone (`TZ`), or locale (`LANG`, `LC_TIME`, `LC_ALL`)
+/// variables from `HKCU\Environment` on Windows and broadcasts `WM_SETTINGCHANGE` ("Environment")
+/// to `HWND_BROADCAST` so `explorer.exe` and desktop apps (e.g. Telegram Desktop) never inherit
+/// an IANA `TZ=Europe/...` string that Windows CRT (`_tzset`) misparses as UTC+0 (-3h from MSK).
+pub fn cleanup_legacy_windows_user_env() {
+    #[cfg(target_os = "windows")]
+    {
+        for var_name in [
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "NO_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+            "no_proxy",
+            "TZ",
+            "LANG",
+            "LC_TIME",
+            "LC_ALL",
+        ] {
+            let _ = delete_windows_user_env_var(var_name);
+        }
+        broadcast_windows_env_change();
     }
 }
 
@@ -1098,31 +1128,13 @@ pub fn enable_cli_and_ide_protection_with_tz(
         // 3b. Windows User Environment & PowerShell Profiles
         #[cfg(target_os = "windows")]
         {
-            // Self-heal: Stop writing proxy vars into HKCU\Environment.
-            // Clean up any stale HTTP_PROXY / HTTPS_PROXY / ALL_PROXY from HKCU\Environment so upgrades from v1.2.0 are healed.
-            for stale_var in [
-                "HTTP_PROXY",
-                "HTTPS_PROXY",
-                "ALL_PROXY",
-                "NO_PROXY",
-                "http_proxy",
-                "https_proxy",
-                "all_proxy",
-                "no_proxy",
-            ] {
-                let _ = delete_windows_user_env_var(stale_var);
-            }
-
-            if let Some(timezone) = tz {
-                let trimmed = timezone.trim();
-                if !trimmed.is_empty() {
-                    let _ = set_windows_user_env_var("TZ", trimmed);
-                    let _ = set_windows_user_env_var("LANG", "en_US.UTF-8");
-                    let _ = set_windows_user_env_var("LC_TIME", "en_US.UTF-8");
-                    configured_targets.push("Windows Реестр (HKCU\\Environment: TZ/Locale)".to_string());
-                }
-            }
-            broadcast_windows_env_change();
+            // Self-heal: NEVER write proxy vars or TZ / LANG / LC_TIME into global HKCU\Environment!
+            // Windows CRT (_tzset) and Qt/Electron desktop apps (such as Telegram Desktop) read
+            // HKCU\Environment\TZ, cannot parse IANA timezone strings ("Europe/Amsterdam"), and
+            // silently default to UTC+0 (-3h from Moscow time). Always purge stale vars from
+            // HKCU\Environment and broadcast WM_SETTINGCHANGE ("Environment") so explorer.exe
+            // immediately reloads a clean environment.
+            cleanup_legacy_windows_user_env();
 
             let mut ps_configured = false;
             for ps_path in get_windows_powershell_profile_paths() {
@@ -1245,23 +1257,7 @@ pub fn disable_cli_protection() {
 
     #[cfg(target_os = "windows")]
     {
-        for var_name in [
-            "HTTP_PROXY",
-            "HTTPS_PROXY",
-            "ALL_PROXY",
-            "NO_PROXY",
-            "http_proxy",
-            "https_proxy",
-            "all_proxy",
-            "no_proxy",
-            "TZ",
-            "LANG",
-            "LC_TIME",
-            "LC_ALL",
-        ] {
-            let _ = delete_windows_user_env_var(var_name);
-        }
-        broadcast_windows_env_change();
+        cleanup_legacy_windows_user_env();
 
         for ps_path in get_windows_powershell_profile_paths() {
             if ps_path.exists() {
@@ -1281,6 +1277,7 @@ pub fn disable_cli_protection() {
 pub fn force_clean_all_os_proxy_traces() -> Vec<String> {
     disable_all_sysproxy();
     disable_cli_protection();
+    cleanup_legacy_windows_user_env();
     vec![
         "Системный PAC-прокси".to_string(),
         "Конфигурации VS Code / Cursor / Claude".to_string(),
@@ -1501,6 +1498,7 @@ mod tests {
         assert!(updated.contains("$env:LANG = \"en_US.UTF-8\""));
         assert!(updated.contains("$env:LC_TIME = \"en_US.UTF-8\""));
         assert!(updated.contains("Remove-Item Env:HTTP_PROXY"));
+        assert!(updated.contains("Env:TZ,Env:LANG,Env:LC_TIME,Env:LC_ALL"));
         assert!(updated.contains(ZASTAVA_RC_START));
         assert!(updated.contains(ZASTAVA_RC_END));
 

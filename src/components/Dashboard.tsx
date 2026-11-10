@@ -235,38 +235,62 @@ export const Dashboard: React.FC<DashboardProps> = ({ onSimulateInBrowser }) => 
     setToasts((prev) => prev.filter((t) => t.id !== id));
   };
 
-  const runFullAudit = async (force: boolean = false) => {
+  const runFullAudit = async (force: boolean = false, silentError: boolean = false) => {
     const startTime = performance.now();
     setRefreshing(true);
 
     try {
-      const st = await fetchAppState();
-      setState(st);
-      if (st.auto_update_enabled !== undefined) {
-        setAutoUpdateEnabled(st.auto_update_enabled);
+      try {
+        const st = await fetchAppState();
+        setState(st);
+        if (st.auto_update_enabled !== undefined) {
+          setAutoUpdateEnabled(st.auto_update_enabled);
+        }
+      } catch (stateErr) {
+        console.warn("Could not fetch app state:", stateErr);
       }
 
-      const proxyActive = await getSysproxyStatus();
-      setSysproxyActive(proxyActive);
+      try {
+        const proxyActive = await getSysproxyStatus();
+        setSysproxyActive(proxyActive);
+      } catch (proxyErr) {
+        console.warn("Could not fetch sysproxy status:", proxyErr);
+      }
 
-      const claudeReport = await auditConnection("anthropic", force);
-      const [gptReport, geminiReport] = await Promise.all([
+      let claudeReport: RiskReport;
+      try {
+        claudeReport = await auditConnection("anthropic", force);
+      } catch {
+        await new Promise((r) => setTimeout(r, 600));
+        claudeReport = await auditConnection("anthropic", true);
+      }
+
+      // Immediately update primary report so IP, ISP, and 12-point DeepAuditTab render right away
+      setReports((prev) => ({
+        ...prev,
+        anthropic: claudeReport,
+      }));
+
+      const [gptSettled, geminiSettled] = await Promise.allSettled([
         auditConnection("openai", false),
         auditConnection("gemini", false),
       ]);
 
-      setReports({
+      setReports((prev) => ({
+        ...prev,
         anthropic: claudeReport,
-        openai: gptReport,
-        gemini: geminiReport,
-      });
+        ...(gptSettled.status === "fulfilled" ? { openai: gptSettled.value } : {}),
+        ...(geminiSettled.status === "fulfilled" ? { gemini: geminiSettled.value } : {}),
+      }));
 
       const elapsed = Math.round(performance.now() - startTime);
       setScanLatencyMs(Math.max(18, elapsed));
       await refreshGatewayStats();
     } catch (err: any) {
       console.error("Failed to run audit:", err);
-      showToast("Ошибка аудита", err?.message || String(err), "error");
+      if (!silentError) {
+        showToast("Ошибка аудита", err?.message || String(err), "error");
+      }
     } finally {
       setRefreshing(false);
       refreshGatewayStats();
@@ -303,7 +327,10 @@ export const Dashboard: React.FC<DashboardProps> = ({ onSimulateInBrowser }) => 
     if (activeTab === "claude_vault" && !claudeSummary) {
       loadClaudeSummary();
     }
-  }, [activeTab, claudeSummary]);
+    if (activeTab === "audit" && !reports.anthropic && !refreshing) {
+      runFullAudit(true, true);
+    }
+  }, [activeTab, claudeSummary, reports.anthropic, refreshing]);
 
   const handleCheckUpdates = async (silent: boolean = false) => {
     setCheckingUpdate(true);
@@ -385,7 +412,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ onSimulateInBrowser }) => 
   };
 
   useEffect(() => {
-    runFullAudit(false);
+    runFullAudit(true, true);
     handleCheckUpdates(true);
     getNetworkKillswitchStatus()
       .then((frozen) => setKillswitchFrozen(frozen))
@@ -508,6 +535,39 @@ export const Dashboard: React.FC<DashboardProps> = ({ onSimulateInBrowser }) => 
   const currentIp = activeReport?.telemetry.ip || "--";
   const currentCountry = activeReport?.telemetry.country_code || "--";
   const trustScore = activeReport?.trust_score ?? 100;
+
+  // Startup self-healing poll: if initial audit was still waiting on cold-start network/PAC setup
+  // or returned without IP/provider metadata, automatically re-probe without requiring manual click.
+  useEffect(() => {
+    const missingIp = !activeReport || !activeReport.telemetry?.ip || activeReport.telemetry.ip === "--";
+    const missingProvider =
+      activeReport &&
+      !activeReport.telemetry?.asn &&
+      !activeReport.telemetry?.isp &&
+      !activeReport.telemetry?.org;
+
+    if (!missingIp && !missingProvider) {
+      return;
+    }
+
+    let attempts = 0;
+    const maxAttempts = 6;
+    const timer = setInterval(() => {
+      attempts += 1;
+      if (attempts > maxAttempts) {
+        clearInterval(timer);
+        return;
+      }
+      runFullAudit(true, true);
+    }, 1500);
+
+    return () => clearInterval(timer);
+  }, [
+    activeReport?.telemetry?.ip,
+    activeReport?.telemetry?.asn,
+    activeReport?.telemetry?.isp,
+    activeReport?.telemetry?.org,
+  ]);
 
   const handleSwitchScenario = (next: MockScenario) => {
     setMockScenario(next);
@@ -872,40 +932,97 @@ export const Dashboard: React.FC<DashboardProps> = ({ onSimulateInBrowser }) => 
           )}
         </div>
 
-        <header className="flex items-center justify-between pb-2.5 border-b border-white/[0.07] gap-2">
-          {/* Logo & Title */}
-          <div className="flex items-center gap-2 min-w-0">
-            <div className="w-6 h-6 rounded-md bg-emerald-500/10 border border-emerald-500/25 flex items-center justify-center text-emerald-400 shrink-0">
-              <Shield className="w-3.5 h-3.5" strokeWidth={1.75} />
-            </div>
-            <div className="min-w-0">
-              <div className="flex items-center gap-1.5">
-                <h1 className="text-xs font-bold tracking-tight text-white whitespace-nowrap">
-                  Застава
-                </h1>
-                <button
-                  type="button"
-                  disabled={checkingUpdate}
-                  onClick={() => handleCheckUpdates(false)}
-                  title="Проверить обновления из GitHub Releases"
-                  className={`text-[9px] px-1.5 py-0.2 rounded border font-mono tabular-nums flex items-center gap-1 cursor-pointer transition-colors shrink-0 whitespace-nowrap ${
-                    updateInfo?.update_available
-                      ? "bg-amber-500/15 border-amber-500/40 text-amber-300 font-semibold"
-                      : "bg-zinc-900 hover:bg-zinc-800 border-white/[0.08] text-zinc-300"
-                  }`}
-                >
-                  <span>v1.3.0</span>
-                  <Download className={`w-2.5 h-2.5 ${checkingUpdate ? "animate-bounce text-emerald-400" : updateInfo?.update_available ? "text-amber-300" : "text-zinc-400"}`} />
-                </button>
+        <header className="pb-2.5 border-b border-white/[0.07] space-y-2">
+          {/* Tier 1: Brand & Quick Utilities */}
+          <div className="flex items-center justify-between gap-2">
+            {/* Logo & Title */}
+            <div className="flex items-center gap-2 min-w-0">
+              <div className="w-7 h-7 rounded-lg bg-emerald-500/10 border border-emerald-500/25 flex items-center justify-center text-emerald-400 shrink-0">
+                <Shield className="w-4 h-4" strokeWidth={1.75} />
               </div>
-              <p className="text-[9.5px] text-zinc-500 leading-none mt-0.5 truncate max-w-[170px]">
-                Защита от бана ИИ · Без чтения чатов
-              </p>
+              <div className="min-w-0">
+                <div className="flex items-center gap-1.5">
+                  <h1 className="text-xs font-bold tracking-tight text-white whitespace-nowrap">
+                    Застава
+                  </h1>
+                  <button
+                    type="button"
+                    disabled={checkingUpdate}
+                    onClick={() => handleCheckUpdates(false)}
+                    title="Проверить обновления из GitHub Releases"
+                    className={`text-[9px] px-1.5 py-0.2 rounded border font-mono tabular-nums flex items-center gap-1 cursor-pointer transition-colors shrink-0 whitespace-nowrap ${
+                      updateInfo?.update_available
+                        ? "bg-amber-500/15 border-amber-500/40 text-amber-300 font-semibold"
+                        : "bg-zinc-900 hover:bg-zinc-800 border-white/[0.08] text-zinc-300"
+                    }`}
+                  >
+                    <span>v1.3.1</span>
+                    <Download className={`w-2.5 h-2.5 ${checkingUpdate ? "animate-bounce text-emerald-400" : updateInfo?.update_available ? "text-amber-300" : "text-zinc-400"}`} />
+                  </button>
+                </div>
+                <p className="text-[9.5px] text-zinc-500 leading-none mt-0.5 truncate">
+                  Защита от бана ИИ · Без чтения чатов
+                </p>
+              </div>
+            </div>
+
+            {/* Quick Utilities: Refresh, Telegram Support, Settings Gear */}
+            <div className="flex items-center gap-1.5 shrink-0">
+              <button
+                type="button"
+                disabled={refreshing}
+                onClick={() => runFullAudit(true)}
+                title="Перепроверить соединение"
+                className="whitespace-nowrap shrink-0 flex items-center gap-1 px-2 py-1.5 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-white/[0.08] text-[10px] font-mono text-zinc-400 hover:text-white transition-colors cursor-pointer"
+              >
+                <RotateCw
+                  className={`w-3 h-3 shrink-0 ${refreshing ? "animate-spin text-emerald-400" : ""}`}
+                />
+                <span className="tabular-nums text-[9px]">{scanLatencyMs}мс</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={handleOpenSupport}
+                title="Связь и поддержка в Telegram: @nomadnocode"
+                className="flex items-center gap-1 px-2 py-1.5 rounded-lg bg-sky-500/10 hover:bg-sky-500/20 border border-sky-500/25 text-[10px] font-sans font-medium text-sky-300 hover:text-sky-200 transition-colors cursor-pointer shrink-0 whitespace-nowrap"
+              >
+                <Send className="w-2.5 h-2.5 text-sky-400 shrink-0" />
+                <span>ТГ</span>
+              </button>
+
+              {/* Gear Button -> SettingsModal */}
+              <button
+                type="button"
+                onClick={() => setShowSettingsModal(true)}
+                title="Настройки и сетевая прозрачность"
+                className="p-1.5 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-white/[0.08] text-zinc-400 hover:text-white transition-colors cursor-pointer shrink-0"
+              >
+                <Settings className="w-3.5 h-3.5" />
+              </button>
             </div>
           </div>
 
-          {/* Controls: Kill-Switch, Settings Gear, Support, PAC Proxy Toggle & Refresh */}
-          <div className="flex items-center gap-1.5 shrink-0">
+          {/* Tier 2: Tactical Protection & Emergency Kill-Switch Bar */}
+          <div className="flex items-center justify-between gap-2">
+            <button
+              type="button"
+              onClick={handleToggleSysproxy}
+              title={sysproxyActive ? "Отключить защиту трафика" : "Включить защиту трафика ИИ"}
+              className={`flex-1 flex items-center justify-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[10px] font-mono border transition-all cursor-pointer whitespace-nowrap ${
+                sysproxyActive
+                  ? "bg-emerald-500/15 border-emerald-500/30 text-emerald-300 font-semibold shadow-xs"
+                  : "bg-zinc-900 border-white/[0.08] text-zinc-400 hover:text-zinc-200"
+              }`}
+            >
+              <Radio
+                className={`w-3 h-3 shrink-0 ${
+                  sysproxyActive ? "text-emerald-400 animate-pulse" : "text-zinc-500"
+                }`}
+              />
+              <span>{sysproxyActive ? "ЗАЩИТА ВКЛ" : "ЗАЩИТА ВЫКЛ"}</span>
+            </button>
+
             {/* Kill-switch button */}
             <button
               type="button"
@@ -915,7 +1032,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ onSimulateInBrowser }) => 
                   ? "СТОП СЕТИ АКТИВЕН — Нажмите, чтобы разморозить ИИ"
                   : "Экстренно заморозить все запросы к ИИ в 1 клик"
               }
-              className={`whitespace-nowrap shrink-0 flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[10px] font-bold tracking-wide border transition-colors cursor-pointer ${
+              className={`flex-1 flex items-center justify-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[10px] font-bold tracking-wide border transition-colors cursor-pointer whitespace-nowrap ${
                 killswitchFrozen
                   ? "bg-rose-500/20 border-rose-500/50 text-rose-200 animate-pulse font-bold"
                   : "bg-rose-500/10 hover:bg-rose-500/20 border-rose-500/30 text-rose-300"
@@ -932,57 +1049,6 @@ export const Dashboard: React.FC<DashboardProps> = ({ onSimulateInBrowser }) => 
                   <span>СТОП СЕТИ</span>
                 </>
               )}
-            </button>
-
-            {/* Gear Button -> SettingsModal */}
-            <button
-              type="button"
-              onClick={() => setShowSettingsModal(true)}
-              title="Настройки и сетевая прозрачность"
-              className="p-1.5 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-white/[0.08] text-zinc-400 hover:text-white transition-colors cursor-pointer shrink-0"
-            >
-              <Settings className="w-3.5 h-3.5" />
-            </button>
-
-            <button
-              type="button"
-              onClick={handleOpenSupport}
-              title="Связь и поддержка в Telegram: @nomadnocode"
-              className="flex items-center gap-1 px-1.5 py-1.5 rounded-lg bg-sky-500/10 hover:bg-sky-500/20 border border-sky-500/25 text-[10px] font-sans font-medium text-sky-300 hover:text-sky-200 transition-colors cursor-pointer shrink-0 whitespace-nowrap"
-            >
-              <Send className="w-2.5 h-2.5 text-sky-400 shrink-0" />
-              <span>ТГ</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={handleToggleSysproxy}
-              title={sysproxyActive ? "Отключить защиту трафика" : "Включить защиту трафика ИИ"}
-              className={`whitespace-nowrap shrink-0 flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[10px] font-mono border transition-all cursor-pointer ${
-                sysproxyActive
-                  ? "bg-emerald-500/15 border-emerald-500/30 text-emerald-300 font-semibold shadow-xs"
-                  : "bg-zinc-900 border-white/[0.08] text-zinc-400 hover:text-zinc-200"
-              }`}
-            >
-              <Radio
-                className={`w-3 h-3 shrink-0 ${
-                  sysproxyActive ? "text-emerald-400 animate-pulse" : "text-zinc-500"
-                }`}
-              />
-              <span>{sysproxyActive ? "ЗАЩИТА ВКЛ" : "ЗАЩИТА ВЫКЛ"}</span>
-            </button>
-
-            <button
-              type="button"
-              disabled={refreshing}
-              onClick={() => runFullAudit(true)}
-              title="Перепроверить соединение"
-              className="whitespace-nowrap shrink-0 flex items-center gap-1 px-2 py-1.5 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-white/[0.08] text-[10px] font-mono text-zinc-400 hover:text-white transition-colors cursor-pointer"
-            >
-              <RotateCw
-                className={`w-3 h-3 shrink-0 ${refreshing ? "animate-spin text-emerald-400" : ""}`}
-              />
-              <span className="tabular-nums text-[9px]">{scanLatencyMs}мс</span>
             </button>
           </div>
         </header>
@@ -1020,14 +1086,13 @@ export const Dashboard: React.FC<DashboardProps> = ({ onSimulateInBrowser }) => 
             type="button"
             onClick={() => setActiveTab("claude_vault")}
             title="Бэкап данных Claude и мульти-аккаунт профили"
-            className={`py-1.5 px-0.5 rounded-md transition-all text-center cursor-pointer flex items-center justify-center gap-1 truncate ${
+            className={`py-1.5 px-0.5 rounded-md transition-all text-center cursor-pointer truncate ${
               activeTab === "claude_vault"
                 ? "bg-white/[0.12] text-white font-bold shadow-xs"
                 : "text-zinc-400 hover:text-zinc-200"
             }`}
           >
-            <FolderArchive className="w-2.5 h-2.5 shrink-0 text-emerald-400" />
-            <span className="truncate">Бэкап и Профили</span>
+            Бэкап
           </button>
 
           <button
@@ -1298,6 +1363,10 @@ export const Dashboard: React.FC<DashboardProps> = ({ onSimulateInBrowser }) => 
                         ? `AS${activeReport.telemetry.asn} · ${
                             activeReport.telemetry.isp || activeReport.telemetry.org || "Хостинг"
                           }`
+                        : activeReport?.telemetry.isp || activeReport?.telemetry.org
+                        ? `${activeReport.telemetry.isp || activeReport.telemetry.org}`
+                        : activeReport?.telemetry.ip && activeReport.telemetry.ip !== "--"
+                        ? `Узел ${activeReport.telemetry.country_code || "VPN"} · Защищённый шлюз`
                         : "Определение провайдера..."}
                     </div>
 

@@ -446,7 +446,7 @@ impl NetworkGuard {
             let country = ctx
                 .auditor
                 .resolver
-                .resolve(true)
+                .resolve_with_upstream(false, active_upstream)
                 .await
                 .ok()
                 .map(|t| t.country_code);

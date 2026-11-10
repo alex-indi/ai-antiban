@@ -627,7 +627,7 @@ export const GuideViewer: React.FC<GuideViewerProps> = ({
               <span className="text-[10px] font-mono text-zinc-500">Локации: NL · DE · US</span>
             </div>
 
-            <div className="space-y-1.5 max-h-[245px] overflow-y-auto pr-0.5">
+            <div className="space-y-1.5">
               {VPS_PROVIDERS.map((vps) => {
                 const isCopied = copiedCode === vps.id;
                 return (
