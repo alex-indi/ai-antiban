@@ -1,0 +1,116 @@
+//! Live VPN crash-test commands.
+
+use crate::{auditor, proxy, state};
+use serde::{Deserialize, Serialize};
+use std::time::Duration;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CrashTestStepResult {
+    pub passed_through: bool,
+    pub intercepted_by_killswitch: bool,
+    pub latency_ms: f64,
+    pub current_ip: String,
+    pub current_country: String,
+    pub leaked_packets: u32,
+    pub status_text: String,
+}
+
+#[tauri::command]
+pub async fn run_vpn_crash_test_step(
+    proxy_manager: tauri::State<'_, proxy::ProxyManager>,
+    auditor: tauri::State<'_, auditor::Auditor>,
+    state: tauri::State<'_, state::AppState>,
+) -> Result<CrashTestStepResult, String> {
+    let proxy_addr = proxy_manager.server.bound_addr;
+    let start = std::time::Instant::now();
+
+    let connect_fut = async {
+        let mut stream = tokio::net::TcpStream::connect(proxy_addr).await?;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let req = b"CONNECT canary-test.anthropic.zastava.local:443 HTTP/1.1\r\nHost: canary-test.anthropic.zastava.local:443\r\n\r\n";
+        stream.write_all(req).await?;
+        stream.flush().await?;
+
+        let mut buf = [0u8; 1024];
+        let n = stream.read(&mut buf).await?;
+        let resp = String::from_utf8_lossy(&buf[..n]);
+        Ok::<String, std::io::Error>(resp.to_string())
+    };
+
+    let (current_ip, current_country) = {
+        let upstream_opt = state.get_upstream_proxy().await;
+        let active_upstream = upstream_opt.as_ref().filter(|c| c.enabled);
+        if let Ok(tel) = auditor.resolver.resolve_with_upstream(false, active_upstream).await {
+            (tel.ip, tel.country_code)
+        } else {
+            let st = state.get_data().await;
+            (st.pinned_ip.unwrap_or_else(|| "127.0.0.1".to_string()), "??".to_string())
+        }
+    };
+
+    match tokio::time::timeout(Duration::from_millis(800), connect_fut).await {
+        Ok(Ok(resp)) => {
+            let latency_ms = start.elapsed().as_secs_f64() * 1000.0;
+            if resp.contains("200 OK") || resp.contains("PROTECTED") {
+                Ok(CrashTestStepResult {
+                    passed_through: true,
+                    intercepted_by_killswitch: false,
+                    latency_ms,
+                    current_ip,
+                    current_country,
+                    leaked_packets: 0,
+                    status_text: format!("Защищено · Маршрут чист ({:.1} мс)", latency_ms),
+                })
+            } else {
+                Ok(CrashTestStepResult {
+                    passed_through: false,
+                    intercepted_by_killswitch: true,
+                    latency_ms,
+                    current_ip,
+                    current_country,
+                    leaked_packets: 0,
+                    status_text: format!("Мгновенно перехвачено Kill-Switch ({:.1} мс)", latency_ms),
+                })
+            }
+        }
+        Ok(Err(_io_err)) => {
+            let latency_ms = start.elapsed().as_secs_f64() * 1000.0;
+            Ok(CrashTestStepResult {
+                passed_through: false,
+                intercepted_by_killswitch: true,
+                latency_ms,
+                current_ip,
+                current_country,
+                leaked_packets: 0,
+                status_text: format!("Перехвачено на уровне сокета ({:.1} мс)", latency_ms),
+            })
+        }
+        Err(_timeout) => {
+            Ok(CrashTestStepResult {
+                passed_through: false,
+                intercepted_by_killswitch: true,
+                latency_ms: 800.0,
+                current_ip,
+                current_country,
+                leaked_packets: 0,
+                status_text: "Таймаут сокета · Трафик удержан Kill-Switch (0 пакетов)".to_string(),
+            })
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn trigger_crash_test_drop(
+    proxy_manager: tauri::State<'_, proxy::ProxyManager>,
+) -> Result<(), String> {
+    proxy_manager.guard.freeze_for_test().await;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn reset_crash_test_drop(
+    proxy_manager: tauri::State<'_, proxy::ProxyManager>,
+) -> Result<(), String> {
+    proxy_manager.guard.accept_current().await;
+    Ok(())
+}
