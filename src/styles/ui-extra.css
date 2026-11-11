@@ -1,0 +1,124 @@
+/* Компоненты и состояния, которых нет в пакете ДС (src/ui). Собраны только из токенов (tokens.css)
+   в духе BRAND.md: слои вместо рамок, без свечения и градиентов, shadow-pop — только у всплывающего.
+   Значения не придуманы: размеры 28/36/44, отступы space-*, радиусы radius-*. */
+
+/* Только для скринридера */
+.zs-sr{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}
+
+/* Слой-портал: .zs-root даёт шрифт и кольцо фокуса, фон окна не нужен */
+.zs-root.zs-layer{background:none}
+
+/* Отключённые состояния, которых нет в ДС */
+.zs-switch:disabled,.zs-switch[aria-checked=true]:disabled{cursor:not-allowed;background:var(--bg-2);border-color:var(--bg-3)}
+.zs-switch:disabled::after,.zs-switch[aria-checked=true]:disabled::after{background:var(--ink-3)}
+.zs-tab:disabled{color:var(--ink-3);cursor:not-allowed}
+.zs-input:disabled{background:var(--bg-2);border-color:var(--bg-3);color:var(--ink-3);cursor:not-allowed}
+.zs-input:disabled::placeholder{color:var(--ink-3)}
+
+/* Движение: уважаем системную настройку */
+@media (prefers-reduced-motion:reduce){
+  .zs-switch::after{transition:none}
+}
+
+/* Stat на фоне окна (слой bg-1) */
+.zs-stat--l1{background:var(--bg-1)}
+
+/* Кольцо доверия отдельно от StatusHero */
+.zs-ring--warn .zs-ring__value{stroke:var(--warn)}
+.zs-ring--danger .zs-ring__value{stroke:var(--danger)}
+
+/* Строка с тумблером под фактами StatusHero */
+.zs-hero__switch{margin-top:var(--space-4);padding-bottom:0}
+
+/* Маршрут диалога: на узком окне переносится, бейджи справа */
+.zs-route{flex-wrap:wrap}
+.zs-route .zs-badge+.zs-badge{margin-left:0}
+
+/* Row: кликабельная строка — кнопка/ссылка на всю строку, кольцо фокуса вокруг строки */
+.zs-row--action{position:relative}
+.zs-row--action:hover .zs-row__trail{color:var(--ink)}
+.zs-row__hit{display:block;width:100%;margin:0;padding:0;border:0;background:none;color:inherit;font:inherit;text-align:left;text-decoration:none;cursor:pointer}
+.zs-row__hit .zs-row__title,.zs-row__hit .zs-row__sub{display:block;margin:0}
+.zs-row__hit .zs-row__sub{margin-top:1px;font-size:12px;line-height:16px;color:var(--ink-3)}
+.zs-row__hit .zs-row__title{font-weight:500}
+.zs-row__hit::after{content:"";position:absolute;inset:0}
+.zs-root .zs-row__hit:focus-visible{outline:none}
+.zs-root .zs-row__hit:focus-visible::after{outline:2px solid var(--focus);outline-offset:-2px;border-radius:var(--radius-md)}
+.zs-row--action .zs-row__trail{pointer-events:none}
+
+/* Menu */
+.zs-menu{position:relative;display:inline-flex}
+.zs-menu__list{position:absolute;z-index:30;top:calc(100% + var(--space-1));right:0;min-width:220px;max-width:min(320px,calc(100vw - var(--space-8)));margin:0;padding:var(--space-1);list-style:none;border-radius:var(--radius-md);background:var(--bg-2);box-shadow:var(--shadow-pop)}
+.zs-menu--start .zs-menu__list{left:0;right:auto}
+.zs-menu__item{display:flex;align-items:center;gap:var(--space-3);width:100%;min-height:36px;padding:6px var(--space-3);border:0;border-radius:var(--radius-sm);background:none;color:var(--ink);font:inherit;text-align:left;cursor:pointer}
+.zs-menu__item:hover,.zs-menu__item:focus-visible{background:var(--bg-3)}
+.zs-root .zs-menu__item:focus-visible{outline-offset:-2px}
+.zs-menu__item .zs-ic{color:var(--ink-2)}
+.zs-menu__item--danger,.zs-menu__item--danger .zs-ic{color:var(--danger-text)}
+.zs-menu__item:disabled,.zs-menu__item:disabled .zs-ic{color:var(--ink-3);cursor:not-allowed}
+.zs-menu__item:disabled:hover{background:none}
+.zs-menu__sep{height:1px;margin:var(--space-1) var(--space-2);background:var(--line)}
+
+/* Toast */
+.zs-toast{display:flex;align-items:flex-start;gap:var(--space-3);width:100%;max-width:420px;padding:var(--space-3);border-radius:var(--radius-md);background:var(--bg-2);color:var(--ink-2);box-shadow:var(--shadow-pop);pointer-events:auto}
+.zs-toast__icon{width:32px;height:32px;flex:none;display:grid;place-items:center;border-radius:var(--radius-md);background:var(--bg-3);color:var(--ink-2)}
+.zs-toast__icon--ok{background:var(--brand-soft);color:var(--brand-text)}
+.zs-toast__icon--warn{background:var(--warn-soft);color:var(--warn-text)}
+.zs-toast__icon--danger{background:var(--danger-soft);color:var(--danger-text)}
+.zs-toast__icon--info{background:var(--info-soft);color:var(--info-text)}
+.zs-toast__body{flex:1;min-width:0;padding-top:2px}
+.zs-toast__title{margin:0;color:var(--ink);font-weight:600}
+.zs-toast__text{margin:2px 0 0;font-size:13px;line-height:18px}
+.zs-toast__action{margin-top:var(--space-2)}
+.zs-toasts{position:fixed;z-index:60;left:var(--space-4);right:var(--space-4);bottom:var(--space-4);display:flex;flex-direction:column;align-items:center;gap:var(--space-2);pointer-events:none}
+
+/* Modal */
+.zs-modal__backdrop{position:fixed;inset:0;z-index:50;display:flex;align-items:center;justify-content:center;padding:var(--space-4);background:color-mix(in srgb,var(--bg-0) 78%,transparent)}
+.zs-modal{display:flex;flex-direction:column;width:100%;max-width:440px;max-height:100%;border-radius:var(--radius-lg);background:var(--bg-1);color:var(--ink);box-shadow:var(--shadow-pop)}
+.zs-modal:focus{outline:none}
+.zs-modal__head{display:flex;align-items:flex-start;gap:var(--space-3);padding:var(--space-5) var(--space-5) var(--space-3)}
+.zs-modal__title{margin:0;flex:1;font-size:20px;line-height:26px;font-weight:600;letter-spacing:-.01em}
+.zs-modal__body{flex:1 1 auto;min-height:0;overflow-y:auto;padding:var(--space-1) var(--space-5)}
+.zs-modal__foot{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:var(--space-2);padding:var(--space-4) var(--space-5) var(--space-5)}
+
+/* Segmented */
+.zs-seg{display:flex;gap:2px;padding:2px;border-radius:var(--radius-md);background:var(--bg-2)}
+.zs-seg__opt{flex:1 1 0;min-width:0;min-height:32px;padding:6px var(--space-3);display:inline-flex;align-items:center;justify-content:center;gap:var(--space-2);border:0;border-radius:var(--radius-sm);background:none;color:var(--ink-2);font:inherit;font-size:13px;line-height:18px;font-weight:500;text-align:center;cursor:pointer}
+.zs-seg__opt:hover{color:var(--ink)}
+.zs-seg__opt[aria-checked=true]{background:var(--bg-3);color:var(--ink);font-weight:600}
+.zs-seg__opt:disabled{color:var(--ink-3);cursor:not-allowed}
+
+/* Progress */
+.zs-progress__head{display:flex;justify-content:space-between;gap:var(--space-3);margin-bottom:6px;font-size:13px;line-height:18px;color:var(--ink-2)}
+.zs-progress__track{position:relative;overflow:hidden;height:6px;border-radius:var(--radius-pill);background:var(--bg-3)}
+.zs-progress__bar{height:100%;border-radius:var(--radius-pill);background:var(--brand);transition:width .2s ease}
+.zs-progress--warn .zs-progress__bar{background:var(--warn)}
+.zs-progress--danger .zs-progress__bar{background:var(--danger)}
+.zs-progress--indeterminate .zs-progress__bar{position:absolute;top:0;left:-40%;width:40%;animation:zs-progress-run 1.3s ease-in-out infinite}
+@keyframes zs-progress-run{from{left:-40%}to{left:100%}}
+@media (prefers-reduced-motion:reduce){
+  .zs-progress__bar{transition:none}
+  .zs-progress--indeterminate .zs-progress__bar{animation:none;left:30%}
+}
+
+/* Skeleton: пульсация яркости, без градиентов */
+.zs-skeleton{display:block;background:var(--bg-3);animation:zs-pulse 1.4s ease-in-out infinite}
+.zs-skeleton--text{height:16px;border-radius:var(--radius-sm)}
+.zs-skeleton--block{height:64px;border-radius:var(--radius-md)}
+.zs-skeleton--circle{border-radius:var(--radius-pill)}
+.zs-skeleton-group{display:flex;flex-direction:column;gap:var(--space-2)}
+@keyframes zs-pulse{0%,100%{opacity:.45}50%{opacity:1}}
+@media (prefers-reduced-motion:reduce){.zs-skeleton{animation:none;opacity:.7}}
+
+/* EmptyState */
+.zs-empty{display:flex;flex-direction:column;align-items:center;gap:var(--space-1);padding:var(--space-8) var(--space-4);text-align:center}
+.zs-empty__icon{width:48px;height:48px;display:grid;place-items:center;margin-bottom:var(--space-2);border-radius:var(--radius-lg);background:var(--bg-2);color:var(--ink-2)}
+.zs-empty__title{margin:0;font-size:15px;line-height:22px;font-weight:600}
+.zs-empty__text{margin:0;max-width:320px;font-size:13px;line-height:18px;color:var(--ink-2)}
+.zs-empty__action{margin-top:var(--space-3)}
+
+/* Tabs: пять вкладок на минимальной ширине окна (420 px, с 4px-полосой прокрутки остаётся 384 px).
+   Отступ вкладки 10px (ДС) даёт 387 px — не помещается; на узком окне берём space-2. */
+@media (max-width:440px){
+  .zs-tab{padding:0 var(--space-2)}
+}

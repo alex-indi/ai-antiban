@@ -1,5 +1,63 @@
 @import "tailwindcss";
 
+/* Дизайн-система «Застава»: шрифты, токены, стили компонентов (zs-*). Подключаются после tailwind. */
+@import "./styles/fonts.css";
+@import "./styles/tokens.css";
+@import "./styles/zastava.css";
+@import "./styles/ui-extra.css";
+
+/* Токены ДС в теме Tailwind: только ссылки на var(--…), значения лежат в tokens.css.
+   inline — утилиты подставляют var(--…) напрямую, без промежуточных --color-*. */
+@theme inline {
+  --color-bg-0: var(--bg-0);
+  --color-bg-1: var(--bg-1);
+  --color-bg-2: var(--bg-2);
+  --color-bg-3: var(--bg-3);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-ink-3: var(--ink-3);
+  --color-brand: var(--brand);
+  --color-brand-text: var(--brand-text);
+  --color-brand-soft: var(--brand-soft);
+  --color-on-brand: var(--on-brand);
+  --color-danger: var(--danger);
+  --color-danger-text: var(--danger-text);
+  --color-danger-soft: var(--danger-soft);
+  --color-on-danger: var(--on-danger);
+  --color-warn: var(--warn);
+  --color-warn-text: var(--warn-text);
+  --color-warn-soft: var(--warn-soft);
+  --color-on-warn: var(--on-warn);
+  --color-info-text: var(--info-text);
+  --color-info-soft: var(--info-soft);
+  --color-focus: var(--focus);
+
+  /* Радиусы ДС под отдельными именами: rounded-zs-sm / -md / -lg / -pill.
+     Имена --radius-sm/md/lg в Tailwind совпадают с токенами ДС, поэтому штатные
+     rounded-sm/md/lg ниже зафиксированы на прежних значениях — старые экраны не меняются. */
+  --radius-zs-sm: var(--radius-sm);
+  --radius-zs-md: var(--radius-md);
+  --radius-zs-lg: var(--radius-lg);
+  --radius-zs-pill: var(--radius-pill);
+  --radius-sm: 0.25rem;
+  --radius-md: 0.375rem;
+  --radius-lg: 0.5rem;
+
+  /* Отступы ДС совпадают с шагом Tailwind (4px), но привязаны к токенам. */
+  --spacing-1: var(--space-1);
+  --spacing-2: var(--space-2);
+  --spacing-3: var(--space-3);
+  --spacing-4: var(--space-4);
+  --spacing-5: var(--space-5);
+  --spacing-6: var(--space-6);
+  --spacing-8: var(--space-8);
+
+  /* Шрифты: --font-sans и --font-mono объявлены в tokens.css и перекрывают тему Tailwind
+     (имена те же), поэтому font-sans / font-mono уже дают Golos Text и JetBrains Mono. */
+}
+
 @layer base {
   :root {
     --bg-canvas: #0a0b0e;
