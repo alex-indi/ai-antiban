@@ -31,7 +31,7 @@ pub fn run() {
             // Register panic guard and OS termination signal watcher for systemic proxy clean-up
             sysproxy::register_clean_exit_guard();
             sysproxy::spawn_signal_cleanup_watcher();
-            sysproxy::cleanup_legacy_windows_user_env();
+            let _ = sysproxy::cleanup_all_persistent_settings();
 
             init_alert_popup(app);
 
@@ -155,7 +155,7 @@ pub fn run() {
                 }
             }
             tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit => {
-                sysproxy::disable_all_sysproxy();
+                let _ = sysproxy::cleanup_all_persistent_settings();
             }
             _ => {}
         });

@@ -1,269 +1,185 @@
-//! Windows-specific system proxy plumbing: WinINet registry values (PAC URL), the
-//! WinINet refresh notification, and `HKCU\Environment` helpers.
-//! Compiled only on `target_os = "windows"` (see `sysproxy/mod.rs`).
-
+//! WinINet: точные типы и байты реестра, восстановление с проверкой владельца.
 use super::{
-    enable_sysproxy, get_chained_proxy, parse_gateway_port_from_pac_url, parse_reg_dword,
-    parse_reg_sz, parse_windows_proxy_server, set_chained_proxy, silent_command, LAST_PAC_URL,
+    owned_settings::{Backend, Journal, Resource, default_path},
+    parse_gateway_port_from_pac_url, parse_windows_proxy_server, set_chained_proxy,
 };
+use serde_json::{Value, json};
+use std::io;
+use winreg::{RegKey, RegValue, enums::*};
 
-/// Reads `ProxyEnable` and `ProxyServer` from Windows Internet Settings.
-/// If an active third-party proxy is found, saves it to `CHAINED_PROXY`.
-pub(super) fn detect_and_save_windows_chained_proxy(gateway_port: Option<u16>) -> Option<String> {
-    let enable_output = silent_command("reg")
-        .args([
-            "query",
-            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings",
-            "/v",
-            "ProxyEnable",
-        ])
-        .output()
-        .ok()?;
-    let enable_stdout = String::from_utf8_lossy(&enable_output.stdout);
-    let proxy_enable = parse_reg_dword(&enable_stdout, "ProxyEnable").unwrap_or(0);
+const KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings";
 
-    if proxy_enable == 1 {
-        let server_output = silent_command("reg")
-            .args([
-                "query",
-                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings",
-                "/v",
-                "ProxyServer",
-            ])
-            .output()
-            .ok()?;
-        let server_stdout = String::from_utf8_lossy(&server_output.stdout);
-        if let Some(raw_server) = parse_reg_sz(&server_stdout, "ProxyServer") {
-            if let Some(target) = parse_windows_proxy_server(&raw_server, gateway_port) {
-                set_chained_proxy(Some(target.clone()));
-                return Some(target);
-            }
-        }
+fn failure() -> String {
+    "Ошибка доступа к WinINet; неизвестные настройки не изменены".into()
+}
+fn read_raw(name: &str) -> Result<Option<Value>, String> {
+    let key = RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey_with_flags(KEY, KEY_READ)
+        .map_err(|_| failure())?;
+    match key.get_raw_value(name) {
+        Ok(v) => Ok(Some(json!({"kind": v.vtype as u32, "bytes": v.bytes}))),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err(failure()),
     }
-    None
 }
 
-/// Removes the PAC URL and disables or restores third-party chained proxy in the WinINet registry values.
-pub(super) fn disable_system_proxy() {
-    let chained = get_chained_proxy();
-
-    // On Windows remove HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings\AutoConfigURL
-    let _ = silent_command("reg")
-        .args([
-            "delete",
-            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings",
-            "/v",
-            "AutoConfigURL",
-            "/f",
-        ])
-        .output();
-
-    if let Some(chained_target) = chained {
-        let _ = silent_command("reg")
-            .args([
-                "add",
-                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings",
-                "/v",
-                "ProxyServer",
-                "/t",
-                "REG_SZ",
-                "/d",
-                &chained_target,
-                "/f",
-            ])
-            .output();
-        let _ = silent_command("reg")
-            .args([
-                "add",
-                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings",
-                "/v",
-                "ProxyEnable",
-                "/t",
-                "REG_DWORD",
-                "/d",
-                "1",
-                "/f",
-            ])
-            .output();
+pub(super) fn read(resource: &Resource) -> Result<Option<Value>, String> {
+    let Resource::WindowsProxy(name) = resource else {
+        return Err(failure());
+    };
+    let raw = read_raw(name)?;
+    if name == "ProxyEnable" {
+        // Не включаем старый explicit proxy, если VPN сменил его адрес или исключения.
+        Ok(Some(
+            json!({"raw": raw, "server": read_raw("ProxyServer")?, "bypass": read_raw("ProxyOverride")?, "pac": read_raw("AutoConfigURL")?}),
+        ))
     } else {
-        let _ = silent_command("reg")
-            .args([
-                "add",
-                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings",
-                "/v",
-                "ProxyEnable",
-                "/t",
-                "REG_DWORD",
-                "/d",
-                "0",
-                "/f",
-            ])
-            .output();
+        Ok(raw)
     }
-    notify_windows_inet_refresh();
 }
 
-/// Writes the PAC URL into the WinINet registry values and records it in `configured`.
-pub(super) fn enable_system_proxy(pac_url: &str, configured: &mut Vec<String>) {
-    let gateway_port = parse_gateway_port_from_pac_url(pac_url);
-
-    // 1. Detect third-party proxy before overriding, chain it
-    detect_and_save_windows_chained_proxy(gateway_port);
-
-    // 2. Write AutoConfigURL
-    let output = silent_command("reg")
-        .args([
-            "add",
-            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings",
-            "/v",
-            "AutoConfigURL",
-            "/t",
-            "REG_SZ",
-            "/d",
-            pac_url,
-            "/f",
-        ])
-        .output();
-
-    // 3. Set ProxyEnable = 0 so WinINet routes via AutoConfigURL (PAC)
-    let _ = silent_command("reg")
-        .args([
-            "add",
-            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings",
-            "/v",
-            "ProxyEnable",
-            "/t",
-            "REG_DWORD",
-            "/d",
-            "0",
-            "/f",
-        ])
-        .output();
-
-    if output.is_ok() {
-        configured.push("Windows Internet Settings (WinINet)".to_string());
-    }
-    notify_windows_inet_refresh();
-}
-
-/// Windows branch of `refresh_if_services_changed`: re-applies the PAC URL when the registry value drifted
-/// or when a third-party VPN client enabled an explicit ProxyServer.
-pub(super) fn refresh_if_changed() -> bool {
-    let pac = LAST_PAC_URL.lock().ok().and_then(|g| g.clone());
-    if let Some(pac) = pac {
-        let gateway_port = parse_gateway_port_from_pac_url(&pac);
-
-        // Check if an external tool turned ProxyEnable back on
-        if detect_and_save_windows_chained_proxy(gateway_port).is_some() {
-            return enable_sysproxy(&pac).is_ok();
+pub(super) fn write(resource: &Resource, value: &Option<Value>) -> Result<(), String> {
+    let Resource::WindowsProxy(name) = resource else {
+        return Err(failure());
+    };
+    let value = if name == "ProxyEnable" {
+        value
+            .as_ref()
+            .and_then(|v| v.get("raw"))
+            .filter(|v| !v.is_null())
+    } else {
+        value.as_ref()
+    };
+    let key = RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey_with_flags(KEY, KEY_SET_VALUE)
+        .map_err(|_| failure())?;
+    if let Some(value) = value {
+        let kind = match value["kind"].as_u64() {
+            Some(0) => REG_NONE,
+            Some(1) => REG_SZ,
+            Some(2) => REG_EXPAND_SZ,
+            Some(3) => REG_BINARY,
+            Some(4) => REG_DWORD,
+            Some(5) => REG_DWORD_BIG_ENDIAN,
+            Some(6) => REG_LINK,
+            Some(7) => REG_MULTI_SZ,
+            Some(8) => REG_RESOURCE_LIST,
+            Some(9) => REG_FULL_RESOURCE_DESCRIPTOR,
+            Some(10) => REG_RESOURCE_REQUIREMENTS_LIST,
+            Some(11) => REG_QWORD,
+            _ => return Err(failure()),
+        };
+        let bytes: Vec<u8> =
+            serde_json::from_value(value["bytes"].clone()).map_err(|_| failure())?;
+        key.set_raw_value(
+            name,
+            &RegValue {
+                vtype: kind,
+                bytes: bytes.into(),
+            },
+        )
+        .map_err(|_| failure())?;
+    } else {
+        match key.delete_value(name) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(_) => return Err(failure()),
         }
+    }
+    notify_windows_inet_refresh()?;
+    Ok(())
+}
 
-        if let Ok(output) = silent_command("reg")
-            .args([
-                "query",
-                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings",
-                "/v",
-                "AutoConfigURL",
-            ])
-            .output()
-        {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            if !output.status.success() || !stdout.contains(&pac) {
-                return enable_sysproxy(&pac).is_ok();
+fn decode_string(value: &Value) -> Option<String> {
+    if value["kind"] != 1 {
+        return None;
+    }
+    let bytes: Vec<u8> = serde_json::from_value(value["bytes"].clone()).ok()?;
+    if bytes.len() % 2 != 0 {
+        return None;
+    }
+    let mut words: Vec<u16> = bytes
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .collect();
+    if words.last() == Some(&0) {
+        words.pop();
+    }
+    String::from_utf16(&words).ok()
+}
+
+pub(super) fn enable_system_proxy(
+    pac_url: &str,
+    configured: &mut Vec<String>,
+) -> Result<(), String> {
+    let mut journal = Journal::open(default_path()?)?;
+    let mut system = super::SystemSettings;
+    let flag = Resource::WindowsProxy("ProxyEnable".into());
+    let pac = Resource::WindowsProxy("AutoConfigURL".into());
+    let baseline = journal
+        .original(&flag)
+        .unwrap_or(system.read(&flag)?)
+        .ok_or_else(failure)?;
+    let raw = &baseline["raw"];
+    let bytes: Vec<u8> = serde_json::from_value(raw["bytes"].clone()).unwrap_or_default();
+    if raw["kind"] == 4 && bytes == 1u32.to_le_bytes() {
+        if let Some(server) = baseline.get("server").and_then(decode_string) {
+            // Существующий генератор PAC поддерживает единственный HTTP upstream.
+            let endpoints: Vec<&str> = server
+                .split(';')
+                .map(|s| s.split_once('=').map_or(s, |(_, v)| v).trim())
+                .collect();
+            if endpoints.windows(2).any(|w| w[0] != w[1])
+                || server.to_ascii_lowercase().contains("socks=")
+            {
+                return Err(
+                    "Различные proxy для протоколов нельзя безопасно объединить в один PAC".into(),
+                );
             }
+            let target =
+                parse_windows_proxy_server(&server, parse_gateway_port_from_pac_url(pac_url))
+                    .ok_or("Не удалось безопасно построить цепочку прокси")?;
+            set_chained_proxy(Some(target));
+        } else {
+            return Err("Неизвестный тип ProxyServer: настройки сохранены".into());
         }
     }
-    false
+    let bytes: Vec<u8> = pac_url
+        .encode_utf16()
+        .chain(Some(0))
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    let pac_value = json!({"kind": 1, "bytes": bytes});
+    let mut disabled = baseline.clone();
+    disabled["raw"] = json!({"kind": 4, "bytes": 0u32.to_le_bytes()});
+    disabled["pac"] = pac_value.clone();
+    journal.check(&mut system, &pac)?;
+    journal.check(&mut system, &flag)?;
+    let mut after_url = system.read(&flag)?.ok_or_else(failure)?;
+    after_url["pac"] = pac_value.clone();
+    journal.prepare_context(&mut system, &flag, Some(after_url))?;
+    journal.apply(&mut system, pac, Some(pac_value))?;
+    journal.apply(&mut system, flag, Some(disabled))?;
+    configured.push("Windows Internet Settings (WinINet)".into());
+    Ok(())
 }
 
-pub(super) fn notify_windows_inet_refresh() {
+pub(super) fn notify_windows_inet_refresh() -> Result<(), String> {
     #[link(name = "wininet")]
     unsafe extern "system" {
         fn InternetSetOptionW(
-            hInternet: *mut core::ffi::c_void,
-            dwOption: u32,
-            lpBuffer: *mut core::ffi::c_void,
-            dwBufferLength: u32,
+            h: *mut core::ffi::c_void,
+            option: u32,
+            buffer: *mut core::ffi::c_void,
+            len: u32,
         ) -> i32;
     }
-    const INTERNET_OPTION_SETTINGS_CHANGED: u32 = 39;
-    const INTERNET_OPTION_REFRESH: u32 = 37;
     unsafe {
-        let _ = InternetSetOptionW(
-            core::ptr::null_mut(),
-            INTERNET_OPTION_SETTINGS_CHANGED,
-            core::ptr::null_mut(),
-            0,
-        );
-        let _ = InternetSetOptionW(
-            core::ptr::null_mut(),
-            INTERNET_OPTION_REFRESH,
-            core::ptr::null_mut(),
-            0,
-        );
+        for option in [39, 37] {
+            if InternetSetOptionW(std::ptr::null_mut(), option, std::ptr::null_mut(), 0) == 0 {
+                return Err("WinINet не подтвердил обновление настроек; журнал сохранён".into());
+            }
+        }
     }
-}
-
-pub fn set_windows_user_env_var(name: &str, value: &str) -> std::io::Result<()> {
-    silent_command("reg")
-        .args(["add", r"HKCU\Environment", "/v", name, "/t", "REG_SZ", "/d", value, "/f"])
-        .output()?;
     Ok(())
-}
-
-pub fn delete_windows_user_env_var(name: &str) -> std::io::Result<()> {
-    let _ = silent_command("reg")
-        .args(["delete", r"HKCU\Environment", "/v", name, "/f"])
-        .output();
-    Ok(())
-}
-
-pub fn broadcast_windows_env_change() {
-    #[link(name = "user32")]
-    unsafe extern "system" {
-        fn SendMessageTimeoutW(
-            hWnd: *mut core::ffi::c_void,
-            Msg: u32,
-            wParam: usize,
-            lParam: *const u16,
-            fuFlags: u32,
-            uTimeout: u32,
-            lpdwResult: *mut usize,
-        ) -> isize;
-        fn SendMessageTimeoutA(
-            hWnd: *mut core::ffi::c_void,
-            Msg: u32,
-            wParam: usize,
-            lParam: *const u8,
-            fuFlags: u32,
-            uTimeout: u32,
-            lpdwResult: *mut usize,
-        ) -> isize;
-    }
-    const HWND_BROADCAST: *mut core::ffi::c_void = 0xffff as *mut core::ffi::c_void;
-    const WM_SETTINGCHANGE: u32 = 0x001A;
-    const SMTO_ABORTIFHUNG: u32 = 0x0002;
-    let env_wide: Vec<u16> = "Environment\0".encode_utf16().collect();
-    let env_ansi: &[u8] = b"Environment\0";
-    let mut dw_result: usize = 0;
-    unsafe {
-        let _ = SendMessageTimeoutW(
-            HWND_BROADCAST,
-            WM_SETTINGCHANGE,
-            0,
-            env_wide.as_ptr(),
-            SMTO_ABORTIFHUNG,
-            2000,
-            &mut dw_result,
-        );
-        let _ = SendMessageTimeoutA(
-            HWND_BROADCAST,
-            WM_SETTINGCHANGE,
-            0,
-            env_ansi.as_ptr(),
-            SMTO_ABORTIFHUNG,
-            2000,
-            &mut dw_result,
-        );
-    }
 }

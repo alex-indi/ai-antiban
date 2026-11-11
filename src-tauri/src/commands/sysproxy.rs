@@ -32,10 +32,14 @@ pub async fn toggle_sysproxy(
                 None
             }
         };
-        let _ = sysproxy::enable_cli_and_ide_protection_with_tz(&pac_url, tz.as_deref());
+        let report = sysproxy::enable_cli_and_ide_protection_with_tz(&pac_url, tz.as_deref());
+        if !report.errors.is_empty() {
+            return Err(report.errors.join("; "));
+        }
         Ok(true)
     } else {
-        sysproxy::disable_all_sysproxy();
+        let reports = sysproxy::disable_all_sysproxy();
+        ensure_recovered(&reports)?;
         Ok(false)
     }
 }
@@ -66,7 +70,11 @@ pub async fn enable_cli_protection(
             None
         }
     };
-    Ok(sysproxy::enable_cli_and_ide_protection_with_tz(&addr, tz.as_deref()))
+    let report = sysproxy::enable_cli_and_ide_protection_with_tz(&addr, tz.as_deref());
+    if !report.errors.is_empty() {
+        return Err(report.errors.join("; "));
+    }
+    Ok(report)
 }
 
 #[tauri::command]
@@ -76,7 +84,8 @@ pub fn check_cli_protection_status() -> Result<bool, String> {
 
 #[tauri::command]
 pub fn disable_cli_protection() -> Result<bool, String> {
-    sysproxy::disable_cli_protection();
+    let reports = sysproxy::disable_cli_protection();
+    ensure_recovered(&reports)?;
     Ok(false)
 }
 
@@ -98,6 +107,10 @@ pub async fn sync_ai_agents_timezone(
 
     let addr = proxy_manager.server.bound_addr.to_string();
     let report = sysproxy::enable_cli_and_ide_protection_with_tz(&addr, Some(&tz_clean));
+
+    if !report.errors.is_empty() {
+        return Err(report.errors.join("; "));
+    }
 
     let targets = if report.configured_targets.is_empty() {
         "терминала и редакторов кода".to_string()
@@ -124,4 +137,19 @@ pub fn get_sysproxy_status() -> Result<bool, String> {
 #[tauri::command]
 pub fn force_clean_os_proxy_cmd() -> Result<Vec<String>, String> {
     Ok(sysproxy::force_clean_all_os_proxy_traces())
+}
+
+/// Ошибки восстановления не маскируются успешным ответом IPC.
+fn ensure_recovered(reports: &[sysproxy::owned_settings::RecoveryReport]) -> Result<(), String> {
+    if reports.iter().any(|r| {
+        matches!(
+            r.outcome,
+            sysproxy::owned_settings::Outcome::Error | sysproxy::owned_settings::Outcome::Unknown
+        )
+    }) {
+        return Err(
+            "Часть настроек не восстановлена; журнал сохранён для повторной попытки".into(),
+        );
+    }
+    Ok(())
 }

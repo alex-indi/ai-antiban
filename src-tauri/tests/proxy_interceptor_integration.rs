@@ -287,6 +287,7 @@ async fn test_connect_hold_and_allow_session() {
 /// Spec: SysProxy::disable() cleans up system proxy settings safely without panic
 /// and sets is_active() to false.
 #[test]
+#[ignore = "Только изолированная VM: вызывает настоящую системную очистку"]
 fn test_graceful_proxy_cleanup() {
     SysProxy::disable();
     assert!(

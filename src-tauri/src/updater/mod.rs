@@ -332,7 +332,7 @@ async fn try_signed_updater(app: &tauri::AppHandle) -> Result<InstallUpdateResul
             },
             move || {
                 let total = total_finish.load(std::sync::atomic::Ordering::Relaxed);
-                crate::sysproxy::disable_all_sysproxy();
+                let _ = crate::sysproxy::cleanup_all_persistent_settings();
                 let _ = app_finish.emit(
                     "updater://progress",
                     UpdateProgressPayload {
@@ -368,7 +368,7 @@ async fn try_signed_updater(app: &tauri::AppHandle) -> Result<InstallUpdateResul
     let app_clone = app.clone();
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(Duration::from_millis(400)).await;
-        crate::sysproxy::disable_all_sysproxy();
+        let _ = crate::sysproxy::cleanup_all_persistent_settings();
         app_clone.restart();
     });
 
@@ -601,7 +601,7 @@ fn apply_platform_update(
             let app_clone = app.clone();
             tauri::async_runtime::spawn(async move {
                 tokio::time::sleep(Duration::from_millis(400)).await;
-                crate::sysproxy::disable_all_sysproxy();
+                let _ = crate::sysproxy::cleanup_all_persistent_settings();
                 app_clone.exit(0);
             });
 
@@ -691,7 +691,7 @@ open "{dmg_path}"
     let app_clone = app.clone();
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(Duration::from_millis(400)).await;
-        crate::sysproxy::disable_all_sysproxy();
+        let _ = crate::sysproxy::cleanup_all_persistent_settings();
         app_clone.exit(0);
     });
 
@@ -744,7 +744,7 @@ fn apply_platform_update(
     let app_clone = app.clone();
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(Duration::from_millis(400)).await;
-        crate::sysproxy::disable_all_sysproxy();
+        let _ = crate::sysproxy::cleanup_all_persistent_settings();
         app_clone.exit(0);
     });
 

@@ -1,10 +1,9 @@
 //! VS Code / Cursor / Windsurf / VSCodium / Antigravity `settings.json` handling (JSONC-safe).
 
+use super::config_settings;
 #[cfg(not(target_os = "windows"))]
 use super::user_home_dir;
-use super::{is_zastava_local_proxy_val, NO_PROXY_VALUE};
-use serde_json::{json, Value};
-use std::fs;
+use serde_json::json;
 use std::path::{Path, PathBuf};
 
 /// Strips `//` and `/* */` comments outside JSON string literals and removes trailing commas
@@ -110,129 +109,22 @@ fn ide_env_key() -> &'static str {
     }
 }
 
-/// Applies Zastava proxy configuration to a VS Code / Cursor / Windsurf `settings.json` file.
-pub fn apply_ide_settings_file(settings_path: &Path, proxy_url: &str) -> Result<bool, String> {
-    apply_ide_settings_file_with_tz(settings_path, proxy_url, None)
+/// Меняет отдельные ключи с сохранением исходных значений и текста JSONC.
+pub fn apply_ide_settings_file(path: &Path, proxy: &str) -> Result<bool, String> {
+    apply_ide_settings_file_with_tz(path, proxy, None)
 }
-
-/// Applies Zastava proxy and optional timezone/locale configuration to a VS Code / Cursor / Windsurf `settings.json` file.
 pub fn apply_ide_settings_file_with_tz(
-    settings_path: &Path,
-    proxy_url: &str,
+    path: &Path,
+    proxy: &str,
     tz: Option<&str>,
 ) -> Result<bool, String> {
-    let raw = if settings_path.exists() {
-        fs::read_to_string(settings_path).map_err(|e| e.to_string())?
-    } else {
-        "{}".to_string()
-    };
-
-    let clean = if raw.trim().is_empty() {
-        "{}".to_string()
-    } else {
-        sanitize_jsonc(&raw)
-    };
-
-    let mut root: Value = serde_json::from_str(&clean).map_err(|e| e.to_string())?;
-    let Some(obj) = root.as_object_mut() else {
-        return Ok(false);
-    };
-
-    obj.insert("http.proxy".to_string(), Value::String(proxy_url.to_string()));
-    obj.insert(
-        "http.proxySupport".to_string(),
-        Value::String("override".to_string()),
-    );
-
-    let env_key = ide_env_key();
-    let env_entry = obj
-        .entry(env_key.to_string())
-        .or_insert_with(|| json!({}));
-    if !env_entry.is_object() {
-        *env_entry = json!({});
-    }
-    if let Some(env_map) = env_entry.as_object_mut() {
-        env_map.insert("HTTP_PROXY".to_string(), Value::String(proxy_url.to_string()));
-        env_map.insert("HTTPS_PROXY".to_string(), Value::String(proxy_url.to_string()));
-        env_map.insert("ALL_PROXY".to_string(), Value::String(proxy_url.to_string()));
-        env_map.insert(
-            "NO_PROXY".to_string(),
-            Value::String(NO_PROXY_VALUE.to_string()),
-        );
-        if let Some(timezone) = tz.and_then(super::shell_rc::sanitize_timezone) {
-            env_map.insert("TZ".to_string(), Value::String(timezone));
-            env_map.insert("LANG".to_string(), Value::String("en_US.UTF-8".to_string()));
-            env_map.insert("LC_TIME".to_string(), Value::String("en_US.UTF-8".to_string()));
-            env_map.insert("LC_ALL".to_string(), Value::String("en_US.UTF-8".to_string()));
-        }
-    }
-
-    let formatted = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
-    fs::write(settings_path, format!("{formatted}\n")).map_err(|e| e.to_string())?;
-    Ok(true)
+    let mut changes = super::ai_cli::env_changes(ide_env_key(), proxy, tz);
+    changes.push((vec!["http.proxy".into()], json!(proxy)));
+    changes.push((vec!["http.proxySupport".into()], json!("override")));
+    config_settings::apply_json(path, changes)
 }
-
-/// Removes Zastava local proxy keys from a VS Code / Cursor / Windsurf `settings.json` file
-/// when Zastava exits or when protection is turned off, preserving all other user settings.
-pub fn cleanup_ide_settings_file(settings_path: &Path) -> Result<bool, String> {
-    if !settings_path.exists() {
-        return Ok(false);
-    }
-    let raw = fs::read_to_string(settings_path).map_err(|e| e.to_string())?;
-    let clean = sanitize_jsonc(&raw);
-    let mut root: Value = serde_json::from_str(&clean).map_err(|e| e.to_string())?;
-    let Some(obj) = root.as_object_mut() else {
-        return Ok(false);
-    };
-
-    let mut changed = false;
-    if let Some(val) = obj.get("http.proxy").and_then(|v| v.as_str()) {
-        if is_zastava_local_proxy_val(val) {
-            obj.remove("http.proxy");
-            obj.remove("http.proxySupport");
-            changed = true;
-        }
-    }
-
-    for env_key in [
-        "terminal.integrated.env.osx",
-        "terminal.integrated.env.windows",
-        "terminal.integrated.env.linux",
-    ] {
-        let mut remove_entire_env_obj = false;
-        if let Some(env_map) = obj.get_mut(env_key).and_then(|v| v.as_object_mut()) {
-            let matches_zastava = env_map
-                .get("HTTPS_PROXY")
-                .or_else(|| env_map.get("HTTP_PROXY"))
-                .and_then(|v| v.as_str())
-                .map(is_zastava_local_proxy_val)
-                .unwrap_or(false);
-
-            if matches_zastava {
-                env_map.remove("HTTP_PROXY");
-                env_map.remove("HTTPS_PROXY");
-                env_map.remove("ALL_PROXY");
-                env_map.remove("NO_PROXY");
-                env_map.remove("TZ");
-                env_map.remove("LANG");
-                env_map.remove("LC_TIME");
-                env_map.remove("LC_ALL");
-                changed = true;
-            }
-            if env_map.is_empty() {
-                remove_entire_env_obj = true;
-            }
-        }
-        if remove_entire_env_obj {
-            obj.remove(env_key);
-        }
-    }
-
-    if changed {
-        let formatted = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
-        fs::write(settings_path, format!("{formatted}\n")).map_err(|e| e.to_string())?;
-    }
-    Ok(changed)
+pub fn cleanup_ide_settings_file(path: &Path) -> Result<bool, String> {
+    config_settings::cleanup_json(path)
 }
 
 pub fn candidate_ide_settings_paths() -> Vec<(&'static str, PathBuf)> {

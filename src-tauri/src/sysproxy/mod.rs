@@ -1,16 +1,15 @@
-//! System proxy and CLI/IDE protection.
-//!
-//! Layout: `macos` / `windows` (platform PAC plumbing), `shell_rc` (zsh/bash/PowerShell blocks),
-//! `ide` (editor settings.json), `ai_cli` (Claude Code / Gemini CLI settings),
-//! `cli_protection` (enable/disable/status orchestration), `cleanup` (exit guard, signals, force clean).
-//! Every previously public name is re-exported here, so external paths are unchanged.
+//! Системный PAC и интеграция ИИ-клиентов с независимыми областями владения.
+//! `owned_settings` хранит исходные значения; платформенные и файловые адаптеры
+//! восстанавливают только неизменённые настройки Zastava.
 
 mod ai_cli;
 mod cleanup;
 mod cli_protection;
+mod config_settings;
 mod ide;
 #[cfg(target_os = "macos")]
 mod macos;
+pub mod owned_settings;
 mod shell_rc;
 #[cfg(target_os = "windows")]
 mod windows;
@@ -21,8 +20,8 @@ pub use ai_cli::{
     cleanup_gemini_cli_settings_file,
 };
 pub use cleanup::{
-    cleanup_all_persistent_settings, cleanup_legacy_windows_user_env, force_clean_all_os_proxy_traces,
-    register_clean_exit_guard, spawn_signal_cleanup_watcher,
+    cleanup_all_persistent_settings, cleanup_legacy_windows_user_env,
+    force_clean_all_os_proxy_traces, register_clean_exit_guard, spawn_signal_cleanup_watcher,
 };
 pub use cli_protection::{
     disable_cli_and_ide_runtime_settings, disable_cli_protection, enable_cli_and_ide_protection,
@@ -34,17 +33,15 @@ pub use ide::{
 };
 pub use shell_rc::{
     build_powershell_guard_block_with_tz, build_shell_rc_guard_block,
-    build_shell_rc_guard_block_with_tz, get_windows_powershell_profile_paths, remove_shell_rc_block,
-    sanitize_timezone, upsert_powershell_profile_content_with_tz, upsert_shell_rc_content,
-    upsert_shell_rc_content_with_tz,
+    build_shell_rc_guard_block_with_tz, get_windows_powershell_profile_paths,
+    remove_shell_rc_block, sanitize_timezone, upsert_powershell_profile_content_with_tz,
+    upsert_shell_rc_content, upsert_shell_rc_content_with_tz,
 };
-#[cfg(target_os = "windows")]
-pub use self::windows::{broadcast_windows_env_change, delete_windows_user_env_var, set_windows_user_env_var};
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 static SYS_PROXY_ACTIVE: AtomicBool = AtomicBool::new(false);
 static CLI_PROTECTION_ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -83,7 +80,9 @@ pub fn parse_gateway_port_from_pac_url(pac_url: &str) -> Option<u16> {
         .or_else(|| pac_url.strip_prefix("https://"))
         .unwrap_or(pac_url);
     let host_port = without_scheme.split('/').next().unwrap_or("");
-    host_port.rsplit_once(':').and_then(|(_, p)| p.parse::<u16>().ok())
+    host_port
+        .rsplit_once(':')
+        .and_then(|(_, p)| p.parse::<u16>().ok())
 }
 
 /// Checks whether `server:port` points to Zastava's own gateway port or default loopback ports,
@@ -95,7 +94,11 @@ pub fn is_gateway_target(server: &str, port: u16, gateway_port: Option<u16>) -> 
     if gateway_port.is_some_and(|gp| gp > 0 && port == gp) {
         return true;
     }
-    let s = server.trim().trim_start_matches('[').trim_end_matches(']').to_ascii_lowercase();
+    let s = server
+        .trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_ascii_lowercase();
     let is_loopback = s == "127.0.0.1" || s == "localhost" || s == "::1";
     if is_loopback && (port == 8899 || port == 8900) {
         return true;
@@ -160,7 +163,11 @@ pub fn parse_windows_proxy_server(raw: &str, gateway_port: Option<u16>) -> Optio
     }
 
     let candidate = if raw.contains('=') {
-        let parts: Vec<&str> = raw.split(';').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+        let parts: Vec<&str> = raw
+            .split(';')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
         let find_proto = |proto: &str| -> Option<&str> {
             parts.iter().find_map(|p| {
                 let (k, v) = p.split_once('=')?;
@@ -176,9 +183,9 @@ pub fn parse_windows_proxy_server(raw: &str, gateway_port: Option<u16>) -> Optio
             .or_else(|| find_proto("http"))
             .or_else(|| find_proto("socks"))
             .or_else(|| {
-                parts.first().and_then(|p| {
-                    p.split_once('=').map(|(_, v)| v.trim()).or(Some(p))
-                })
+                parts
+                    .first()
+                    .and_then(|p| p.split_once('=').map(|(_, v)| v.trim()).or(Some(p)))
             })
     } else {
         Some(raw)
@@ -201,7 +208,11 @@ pub fn parse_windows_proxy_server(raw: &str, gateway_port: Option<u16>) -> Optio
         return None;
     }
 
-    let clean_host = host.trim().trim_start_matches('[').trim_end_matches(']').to_string();
+    let clean_host = host
+        .trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_string();
     if clean_host.is_empty() {
         return None;
     }
@@ -223,7 +234,9 @@ pub fn parse_reg_dword(output: &str, value_name: &str) -> Option<u32> {
             && parts[1].eq_ignore_ascii_case("REG_DWORD")
         {
             let v = parts[2].trim_start_matches("0x").trim_start_matches("0X");
-            return u32::from_str_radix(v, 16).or_else(|_| parts[2].parse::<u32>()).ok();
+            return u32::from_str_radix(v, 16)
+                .or_else(|_| parts[2].parse::<u32>())
+                .ok();
         }
     }
     None
@@ -273,30 +286,98 @@ pub struct CliProtectionReport {
     pub proxy_url: String,
     pub configured_targets: Vec<String>,
     pub shell_command: String,
+    pub errors: Vec<String>,
 }
 
-/// Disables systemic PAC proxy on all network services across macOS and Windows,
-/// and thoroughly cleans up CLI, IDE, and OS environment proxy traces.
-pub fn disable_all_sysproxy() {
-    #[cfg(target_os = "macos")]
-    {
-        macos::disable_system_proxy();
+/// Восстанавливает только системный PAC; интеграция CLI имеет отдельную область владения.
+pub fn disable_all_sysproxy() -> Vec<owned_settings::RecoveryReport> {
+    let reports = recover_system_settings();
+    if reports.iter().any(|r| {
+        matches!(
+            r.outcome,
+            owned_settings::Outcome::Error | owned_settings::Outcome::Unknown
+        )
+    }) {
+        return reports;
     }
-
-    #[cfg(target_os = "windows")]
-    {
-        windows::disable_system_proxy();
-    }
-
-    // Always clean up CLI, shell, PowerShell, IDE settings, and OS environment
-    disable_cli_protection();
-    cleanup_legacy_windows_user_env();
-
     SYS_PROXY_ACTIVE.store(false, Ordering::SeqCst);
     if let Ok(mut g) = LAST_PAC_URL.lock() {
         *g = None;
     }
     set_chained_proxy(None);
+    reports
+}
+
+pub(super) struct SystemSettings;
+impl owned_settings::Backend for SystemSettings {
+    fn finish_restore(&mut self, _resource: &owned_settings::Resource) -> Result<(), String> {
+        #[cfg(target_os = "macos")]
+        {
+            macos::refresh_preferences()?;
+        }
+        #[cfg(target_os = "windows")]
+        {
+            windows::notify_windows_inet_refresh()?;
+        }
+        Ok(())
+    }
+    fn read(
+        &mut self,
+        resource: &owned_settings::Resource,
+    ) -> Result<Option<serde_json::Value>, String> {
+        #[cfg(target_os = "macos")]
+        {
+            return macos::read(resource);
+        }
+        #[cfg(target_os = "windows")]
+        {
+            return windows::read(resource);
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            let _ = resource;
+            Err("Платформа не поддерживается".into())
+        }
+    }
+    fn write(
+        &mut self,
+        resource: &owned_settings::Resource,
+        value: &Option<serde_json::Value>,
+    ) -> Result<(), String> {
+        #[cfg(target_os = "macos")]
+        {
+            return macos::write(resource, value);
+        }
+        #[cfg(target_os = "windows")]
+        {
+            return windows::write(resource, value);
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            let _ = (resource, value);
+            Err("Платформа не поддерживается".into())
+        }
+    }
+}
+
+pub fn recover_system_settings() -> Vec<owned_settings::RecoveryReport> {
+    match owned_settings::default_path().and_then(owned_settings::Journal::open) {
+        Ok(mut journal) => journal.restore(&mut SystemSettings, true),
+        Err(_) => vec![owned_settings::RecoveryReport {
+            item: 0,
+            outcome: owned_settings::Outcome::Unknown,
+        }],
+    }
+}
+
+pub fn recover_client_settings() -> Vec<owned_settings::RecoveryReport> {
+    match owned_settings::default_path().and_then(owned_settings::Journal::open) {
+        Ok(mut journal) => journal.restore(&mut config_settings::Files, false),
+        Err(_) => vec![owned_settings::RecoveryReport {
+            item: 0,
+            outcome: owned_settings::Outcome::Unknown,
+        }],
+    }
 }
 
 /// Enables systemic PAC proxy with the given PAC URL (e.g. "http://127.0.0.1:8899/proxy.pac").
@@ -304,17 +385,22 @@ pub fn enable_sysproxy(pac_url: &str) -> Result<SysproxyStatus, String> {
     register_clean_exit_guard();
     let mut configured = Vec::new();
 
-
     #[cfg(target_os = "macos")]
-    {
-        macos::enable_system_proxy(pac_url, &mut configured)?;
-    }
-
+    let result = macos::enable_system_proxy(pac_url, &mut configured);
     #[cfg(target_os = "windows")]
-    {
-        windows::enable_system_proxy(pac_url, &mut configured);
+    let result = windows::enable_system_proxy(pac_url, &mut configured);
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let result: Result<(), String> = Err("Платформа не поддерживается".into());
+    if let Err(error) = result {
+        // При частичном включении сразу пробуем вернуть собственные изменения.
+        // Неуспешные записи остаются на диске для следующего восстановления.
+        let _ = disable_all_sysproxy();
+        return Err(error);
     }
 
+    if configured.is_empty() {
+        return Err("Не удалось настроить ни одного сетевого сервиса".into());
+    }
     SYS_PROXY_ACTIVE.store(true, Ordering::SeqCst);
     if let Ok(mut g) = LAST_PAC_URL.lock() {
         *g = Some(pac_url.to_string());
@@ -332,30 +418,10 @@ pub fn is_sysproxy_active() -> bool {
     SYS_PROXY_ACTIVE.load(Ordering::SeqCst)
 }
 
-/// Re-applies the PAC configuration when a new network service appeared (e.g. a VPN client
-/// added its own service) or when an external network tool / OS sleep-wake cycle disabled
-/// or overwrote the PAC URL on the primary interface (Self-Healing).
-/// Returns `true` when the configuration was re-applied.
+/// Изменения VPN и новых сервисов не дают Zastava права повторно захватывать PAC.
+/// Следующее явное включение также проверяет сохранённое владение.
 pub fn refresh_if_services_changed() -> bool {
-    if !is_sysproxy_active() {
-        return false;
-    }
-
-
-    #[cfg(target_os = "macos")]
-    {
-        macos::refresh_if_changed()
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        windows::refresh_if_changed()
-    }
-
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    {
-        false
-    }
+    false
 }
 
 pub struct SysProxy;
@@ -372,14 +438,6 @@ impl SysProxy {
     pub fn is_active() -> bool {
         is_sysproxy_active()
     }
-}
-
-fn is_zastava_local_proxy_val(val: &str) -> bool {
-    let v = val.trim().to_ascii_lowercase();
-    v.contains("127.0.0.1:8899")
-        || v.contains("127.0.0.1:8900")
-        || v.contains("localhost:8899")
-        || v.contains("localhost:8900")
 }
 
 pub(super) fn user_home_dir() -> Option<PathBuf> {
@@ -452,7 +510,9 @@ mod tests {
 
         // Test Claude Code ~/.claude/settings.json apply and cleanup
         let claude_settings = tmp_dir.join(".claude").join("settings.json");
-        assert!(apply_claude_code_settings_file(&claude_settings, "http://127.0.0.1:8899").unwrap());
+        assert!(
+            apply_claude_code_settings_file(&claude_settings, "http://127.0.0.1:8899").unwrap()
+        );
         let claude_content = fs::read_to_string(&claude_settings).unwrap();
         assert!(claude_content.contains("\"HTTPS_PROXY\": \"http://127.0.0.1:8899\""));
 
@@ -470,12 +530,14 @@ mod tests {
         let vscode_settings = tmp_dir.join("settings.json");
 
         fs::write(&vscode_settings, "{}").unwrap();
-        assert!(apply_ide_settings_file_with_tz(
-            &vscode_settings,
-            "http://127.0.0.1:8899",
-            Some("Europe/Amsterdam")
-        )
-        .unwrap());
+        assert!(
+            apply_ide_settings_file_with_tz(
+                &vscode_settings,
+                "http://127.0.0.1:8899",
+                Some("Europe/Amsterdam")
+            )
+            .unwrap()
+        );
 
         let content = fs::read_to_string(&vscode_settings).unwrap();
         assert!(content.contains("\"TZ\": \"Europe/Amsterdam\""));
@@ -489,12 +551,14 @@ mod tests {
 
         // Claude settings
         let claude_settings = tmp_dir.join(".claude").join("settings.json");
-        assert!(apply_claude_code_settings_file_with_tz(
-            &claude_settings,
-            "http://127.0.0.1:8899",
-            Some("Europe/Helsinki")
-        )
-        .unwrap());
+        assert!(
+            apply_claude_code_settings_file_with_tz(
+                &claude_settings,
+                "http://127.0.0.1:8899",
+                Some("Europe/Helsinki")
+            )
+            .unwrap()
+        );
         let claude_content = fs::read_to_string(&claude_settings).unwrap();
         assert!(claude_content.contains("\"TZ\": \"Europe/Helsinki\""));
         assert!(claude_content.contains("\"LANG\": \"en_US.UTF-8\""));
@@ -508,7 +572,8 @@ mod tests {
 
     #[test]
     fn test_parse_networksetup_webproxy_output() {
-        let active_output = "Enabled: Yes\nServer: 127.0.0.1\nPort: 10808\nAuthenticated Proxy Enabled: 0\n";
+        let active_output =
+            "Enabled: Yes\nServer: 127.0.0.1\nPort: 10808\nAuthenticated Proxy Enabled: 0\n";
         let parsed = parse_networksetup_webproxy_output(active_output);
         assert_eq!(parsed, Some(("127.0.0.1".to_string(), 10808)));
 
@@ -549,7 +614,10 @@ mod tests {
         );
 
         // Loop prevention: Zastava's active gateway port or default ports
-        assert_eq!(parse_windows_proxy_server("127.0.0.1:8899", Some(8899)), None);
+        assert_eq!(
+            parse_windows_proxy_server("127.0.0.1:8899", Some(8899)),
+            None
+        );
         assert_eq!(
             parse_windows_proxy_server("http=127.0.0.1:8899;https=127.0.0.1:8899", Some(8899)),
             None
@@ -593,6 +661,9 @@ mod tests {
             parse_gateway_port_from_pac_url("http://127.0.0.1:8900/pac.js"),
             Some(8900)
         );
-        assert_eq!(parse_gateway_port_from_pac_url("127.0.0.1:8899"), Some(8899));
+        assert_eq!(
+            parse_gateway_port_from_pac_url("127.0.0.1:8899"),
+            Some(8899)
+        );
     }
 }

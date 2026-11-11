@@ -1,7 +1,7 @@
 //! Shell profile blocks (zsh/bash RC files and PowerShell `$PROFILE`): building, upserting and removing
 //! the Zastava guard block that exports proxy / timezone / locale variables.
 
-use super::{user_home_dir, NO_PROXY_VALUE, ZASTAVA_RC_END, ZASTAVA_RC_START};
+use super::{NO_PROXY_VALUE, ZASTAVA_RC_END, ZASTAVA_RC_START, user_home_dir};
 use std::path::PathBuf;
 
 pub(super) fn normalize_proxy_url_and_port(proxy_addr_or_url: &str) -> (String, u16) {
@@ -46,11 +46,7 @@ pub fn sanitize_timezone(tz: &str) -> Option<String> {
 }
 
 /// Builds the shell RC block including optional timezone and clean UTF-8 locale sync.
-pub fn build_shell_rc_guard_block_with_tz(
-    proxy_url: &str,
-    port: u16,
-    tz: Option<&str>,
-) -> String {
+pub fn build_shell_rc_guard_block_with_tz(proxy_url: &str, port: u16, tz: Option<&str>) -> String {
     let mut tz_exports = String::new();
     if let Some(timezone) = tz.and_then(sanitize_timezone) {
         tz_exports = format!(
@@ -68,13 +64,9 @@ pub fn build_shell_rc_guard_block_with_tz(
     )
 }
 
-/// Builds the PowerShell profile block with proxy settings and optional timezone/locale.
-/// Wraps proxy assignments inside a zero-latency kernel TCP listener check so PowerShell never hangs
-/// or fails when Zastava is closed or uninstalled, and actively removes stale proxy variables.
-pub fn build_powershell_guard_block_with_tz(
-    proxy_url: &str,
-    tz: Option<&str>,
-) -> String {
+/// Формирует блок PowerShell с проверкой локального слушателя.
+/// При выключенной Zastava окружение остаётся без изменений.
+pub fn build_powershell_guard_block_with_tz(proxy_url: &str, tz: Option<&str>) -> String {
     let (url, port) = normalize_proxy_url_and_port(proxy_url);
     let mut tz_assignment = String::new();
     if let Some(timezone) = tz.and_then(sanitize_timezone) {
@@ -82,7 +74,7 @@ pub fn build_powershell_guard_block_with_tz(
     }
 
     format!(
-        "{start}\n$__zastavaUp = $false\ntry {{\n  $__zastavaUp = [bool]([System.Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners() | Where-Object {{ $_.Port -eq {port} }})\n}} catch {{}}\nif ($__zastavaUp) {{\n  $env:HTTP_PROXY = \"{url}\"\n  $env:HTTPS_PROXY = \"{url}\"\n  $env:ALL_PROXY = \"{url}\"\n  $env:http_proxy = \"{url}\"\n  $env:https_proxy = \"{url}\"\n  $env:all_proxy = \"{url}\"\n  $env:NO_PROXY = \"{no_proxy}\"\n  $env:no_proxy = \"{no_proxy}\"\n  $env:LANG = \"en_US.UTF-8\"\n  $env:LC_TIME = \"en_US.UTF-8\"\n  $env:LC_ALL = \"en_US.UTF-8\"{tz_assignment}\n}} else {{\n  Remove-Item Env:HTTP_PROXY,Env:HTTPS_PROXY,Env:ALL_PROXY,Env:http_proxy,Env:https_proxy,Env:all_proxy,Env:TZ,Env:LANG,Env:LC_TIME,Env:LC_ALL -ErrorAction SilentlyContinue\n}}\n{end}",
+        "{start}\n$__zastavaUp = $false\ntry {{\n  $__zastavaUp = [bool]([System.Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners() | Where-Object {{ $_.Port -eq {port} }})\n}} catch {{}}\nif ($__zastavaUp) {{\n  $env:HTTP_PROXY = \"{url}\"\n  $env:HTTPS_PROXY = \"{url}\"\n  $env:ALL_PROXY = \"{url}\"\n  $env:http_proxy = \"{url}\"\n  $env:https_proxy = \"{url}\"\n  $env:all_proxy = \"{url}\"\n  $env:NO_PROXY = \"{no_proxy}\"\n  $env:no_proxy = \"{no_proxy}\"\n  $env:LANG = \"en_US.UTF-8\"\n  $env:LC_TIME = \"en_US.UTF-8\"\n  $env:LC_ALL = \"en_US.UTF-8\"{tz_assignment}\n}}\n{end}",
         start = ZASTAVA_RC_START,
         port = port,
         url = url,
@@ -99,38 +91,21 @@ pub fn upsert_powershell_profile_content_with_tz(
     tz: Option<&str>,
 ) -> String {
     let block = build_powershell_guard_block_with_tz(proxy_url, tz);
-    if let (Some(start_idx), Some(end_idx)) = (
-        existing.find(ZASTAVA_RC_START),
-        existing.find(ZASTAVA_RC_END),
-    ) {
-        if start_idx <= end_idx {
-            let after_end = end_idx + ZASTAVA_RC_END.len();
-            let mut result = String::with_capacity(existing.len() + block.len());
-            result.push_str(&existing[..start_idx]);
-            result.push_str(&block);
-            result.push_str(&existing[after_end..]);
-            return result;
-        }
-    }
-
-    let mut result = existing.to_string();
-    if !result.is_empty() && !result.ends_with('\n') {
-        result.push('\n');
-    }
-    if !result.is_empty() {
-        result.push('\n');
-    }
-    result.push_str(&block);
-    result.push('\n');
-    result
+    upsert_profile_content(existing, &block)
 }
 
 pub fn get_windows_powershell_profile_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
     if let Some(home) = user_home_dir() {
         let docs = home.join("Documents");
-        paths.push(docs.join("PowerShell").join("Microsoft.PowerShell_profile.ps1"));
-        paths.push(docs.join("WindowsPowerShell").join("Microsoft.PowerShell_profile.ps1"));
+        paths.push(
+            docs.join("PowerShell")
+                .join("Microsoft.PowerShell_profile.ps1"),
+        );
+        paths.push(
+            docs.join("WindowsPowerShell")
+                .join("Microsoft.PowerShell_profile.ps1"),
+        );
     }
     paths
 }
@@ -148,49 +123,33 @@ pub fn upsert_shell_rc_content_with_tz(
     tz: Option<&str>,
 ) -> String {
     let block = build_shell_rc_guard_block_with_tz(proxy_url, port, tz);
-    if let (Some(start_idx), Some(end_idx)) = (
-        existing.find(ZASTAVA_RC_START),
-        existing.find(ZASTAVA_RC_END),
-    ) {
-        if start_idx <= end_idx {
-            let after_end = end_idx + ZASTAVA_RC_END.len();
-            let mut result = String::with_capacity(existing.len() + block.len());
-            result.push_str(&existing[..start_idx]);
-            result.push_str(&block);
-            result.push_str(&existing[after_end..]);
-            return result;
-        }
-    }
+    upsert_profile_content(existing, &block)
+}
 
+fn upsert_profile_content(existing: &str, block: &str) -> String {
+    let newline = if existing.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    let block = format!("{block}\n").replace('\n', newline);
     let mut result = existing.to_string();
-    if !result.is_empty() && !result.ends_with('\n') {
-        result.push('\n');
+    match super::config_settings::shell_range(existing) {
+        Ok(Some(range)) => result.replace_range(range, &block),
+        Ok(None) if existing.is_empty() || existing.ends_with('\n') || existing == "\u{feff}" => {
+            result.push_str(&block)
+        }
+        _ => {}
     }
-    if !result.is_empty() {
-        result.push('\n');
-    }
-    result.push_str(&block);
-    result.push('\n');
     result
 }
 
 pub fn remove_shell_rc_block(existing: &str) -> String {
-    if let (Some(start_idx), Some(end_idx)) = (
-        existing.find(ZASTAVA_RC_START),
-        existing.find(ZASTAVA_RC_END),
-    ) {
-        if start_idx <= end_idx {
-            let mut after_end = end_idx + ZASTAVA_RC_END.len();
-            if existing[after_end..].starts_with('\n') {
-                after_end += 1;
-            }
-            let mut result = String::with_capacity(existing.len());
-            result.push_str(&existing[..start_idx]);
-            result.push_str(&existing[after_end..]);
-            return result;
-        }
+    let mut result = existing.to_string();
+    if let Ok(Some(range)) = super::config_settings::shell_range(existing) {
+        result.replace_range(range, "");
     }
-    existing.to_string()
+    result
 }
 
 #[cfg(test)]
@@ -234,9 +193,18 @@ mod tests {
 
     #[test]
     fn test_sanitize_timezone() {
-        assert_eq!(sanitize_timezone("Europe/London"), Some("Europe/London".to_string()));
-        assert_eq!(sanitize_timezone(" America/New_York "), Some("America/New_York".to_string()));
-        assert_eq!(sanitize_timezone("Etc/GMT+3"), Some("Etc/GMT+3".to_string()));
+        assert_eq!(
+            sanitize_timezone("Europe/London"),
+            Some("Europe/London".to_string())
+        );
+        assert_eq!(
+            sanitize_timezone(" America/New_York "),
+            Some("America/New_York".to_string())
+        );
+        assert_eq!(
+            sanitize_timezone("Etc/GMT+3"),
+            Some("Etc/GMT+3".to_string())
+        );
         assert_eq!(sanitize_timezone(""), None);
         assert_eq!(sanitize_timezone("   "), None);
         assert_eq!(sanitize_timezone("Europe/Berlin; rm -rf /"), None);
@@ -258,8 +226,8 @@ mod tests {
         assert!(updated.contains("$env:TZ = \"Europe/Warsaw\""));
         assert!(updated.contains("$env:LANG = \"en_US.UTF-8\""));
         assert!(updated.contains("$env:LC_TIME = \"en_US.UTF-8\""));
-        assert!(updated.contains("Remove-Item Env:HTTP_PROXY"));
-        assert!(updated.contains("Env:TZ,Env:LANG,Env:LC_TIME,Env:LC_ALL"));
+        assert!(!updated.contains("Remove-Item"));
+        assert!(!updated.contains("else {"));
         assert!(updated.contains(ZASTAVA_RC_START));
         assert!(updated.contains(ZASTAVA_RC_END));
 
