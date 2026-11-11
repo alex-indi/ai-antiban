@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main, 'release/**']
+  push:
+    branches: [main, 'release/**']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+          run_install: false
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck & build
+        run: pnpm build
+
+      # lint:hex is added in a separate change; skipped until the script exists.
+      - name: Lint hex colors
+        run: pnpm run --if-present lint:hex
+
+  rust:
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      # tauri::generate_context! fails at compile time if frontendDist (../dist)
+      # does not exist. Tests do not need the real frontend, so a stub is enough.
+      - name: Create frontendDist stub
+        shell: bash
+        run: |
+          mkdir -p dist
+          [ -f dist/index.html ] || echo '<!doctype html><title>stub</title>' > dist/index.html
+
+      - name: Cargo test (all)
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      # TODO: codebase is not yet fmt-clean; remove continue-on-error once fixed.
+      - name: Cargo fmt --check
+        continue-on-error: true
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
+
+      # TODO: codebase is not yet clippy-clean; remove continue-on-error once fixed.
+      - name: Cargo clippy
+        continue-on-error: true
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets
