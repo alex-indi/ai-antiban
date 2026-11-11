@@ -19,6 +19,11 @@ unsafe extern "C" {
     fn CFArrayGetCount(array: CF) -> isize;
     fn CFArrayGetValueAtIndex(array: CF, index: isize) -> CF;
     fn CFDictionaryGetValue(dictionary: CF, key: CF) -> CF;
+    fn CFDictionaryGetCount(dictionary: CF) -> isize;
+    fn CFDictionaryGetKeysAndValues(dictionary: CF, keys: *mut CF, values: *mut CF);
+    fn CFGetTypeID(value: CF) -> usize;
+    fn CFDictionaryGetTypeID() -> usize;
+    fn CFStringGetTypeID() -> usize;
     fn CFDictionaryCreateMutableCopy(alloc: CF, size: isize, dictionary: CF) -> MutableCF;
     fn CFDictionarySetValue(dictionary: MutableCF, key: CF, value: CF);
     fn CFDictionaryRemoveValue(dictionary: MutableCF, key: CF);
@@ -52,6 +57,9 @@ unsafe extern "C" {
     fn SCPreferencesUnlock(preferences: CF) -> bool;
     fn SCPreferencesCommitChanges(preferences: CF) -> bool;
     fn SCPreferencesApplyChanges(preferences: CF) -> bool;
+    fn SCDynamicStoreCreate(alloc: CF, name: CF, callback: CF, context: MutableCF) -> CF;
+    fn SCDynamicStoreCopyKeyList(store: CF, pattern: CF) -> CF;
+    fn SCDynamicStoreCopyValue(store: CF, key: CF) -> CF;
     fn SCNetworkServiceCopyAll(preferences: CF) -> CF;
     fn SCNetworkServiceGetServiceID(service: CF) -> CF;
     fn SCNetworkServiceGetEnabled(service: CF) -> bool;
@@ -164,6 +172,7 @@ impl Preferences {
 
 pub(super) fn refresh_preferences() -> Result<(), String> {
     let prefs = Preferences::new()?;
+    ensure_dns_can_be_reapplied(&prefs)?;
     if !unsafe { SCPreferencesApplyChanges(prefs.preferences.0) } {
         return Err(failure());
     }
@@ -199,6 +208,80 @@ fn property(config: CF, key: &str) -> Result<Option<Value>, String> {
     serialize(unsafe { CFDictionaryGetValue(config, string(key)?.0) })
 }
 
+/// configd при ApplyChanges заново строит весь Setup, включая DNS других программ.
+/// Нельзя применять даже PAC неактивного сервиса поверх временных DNS VPN.
+fn dns_signature(dictionary: CF) -> Result<Option<Value>, String> {
+    if dictionary.is_null() {
+        return Ok(None);
+    }
+    if unsafe { CFGetTypeID(dictionary) != CFDictionaryGetTypeID() } {
+        return Err("Неизвестный формат DNS: системный PAC не изменён".into());
+    }
+    let count =
+        usize::try_from(unsafe { CFDictionaryGetCount(dictionary) }).map_err(|_| failure())?;
+    if count > 1024 {
+        return Err("Не удалось безопасно проверить временные DNS".into());
+    }
+    let mut keys = vec![ptr::null(); count];
+    let mut values = vec![ptr::null(); count];
+    unsafe {
+        CFDictionaryGetKeysAndValues(dictionary, keys.as_mut_ptr(), values.as_mut_ptr());
+    }
+    let mut fields = serde_json::Map::new();
+    for (key, value) in keys.into_iter().zip(values) {
+        if unsafe { CFGetTypeID(key) != CFStringGetTypeID() } {
+            return Err("Неизвестный ключ DNS: системный PAC не изменён".into());
+        }
+        let key = text(key)?;
+        // Служебные поля configd не являются пользовательскими DNS-настройками.
+        if !key.starts_with("__") {
+            fields.insert(key, serialize(value)?.ok_or_else(failure)?);
+        }
+    }
+    Ok((!fields.is_empty()).then_some(Value::Object(fields)))
+}
+
+fn ensure_dns_matches(stored: &Option<Value>, setup: &Option<Value>) -> Result<(), String> {
+    if stored != setup {
+        return Err("Обнаружены временные DNS VPN: применение системного PAC может их сбросить. Настройки не изменены".into());
+    }
+    Ok(())
+}
+
+fn ensure_dns_can_be_reapplied(prefs: &Preferences) -> Result<(), String> {
+    let name = string("Zastava: проверка временных DNS")?;
+    let store = Owned::new(unsafe {
+        SCDynamicStoreCreate(ptr::null(), name.0, ptr::null(), ptr::null_mut())
+    })?;
+    let pattern = string("^Setup:/Network/Service/[^/]+/DNS$")?;
+    let keys = Owned::new(unsafe { SCDynamicStoreCopyKeyList(store.0, pattern.0) })?;
+    let services = prefs.services()?;
+    for index in 0..unsafe { CFArrayGetCount(keys.0) } {
+        let key = unsafe { CFArrayGetValueAtIndex(keys.0, index) };
+        let path = text(key)?;
+        let id = path
+            .strip_prefix("Setup:/Network/Service/")
+            .and_then(|p| p.strip_suffix("/DNS"))
+            .ok_or_else(failure)?;
+        let setup = Owned::new(unsafe { SCDynamicStoreCopyValue(store.0, key) })?;
+        let mut stored = None;
+        for index in 0..unsafe { CFArrayGetCount(services.0) } {
+            let service = unsafe { CFArrayGetValueAtIndex(services.0, index) };
+            if text(unsafe { SCNetworkServiceGetServiceID(service) })? == id {
+                let protocol = unsafe { SCNetworkServiceCopyProtocol(service, string("DNS")?.0) };
+                if !protocol.is_null() {
+                    let protocol = Owned::new(protocol)?;
+                    stored =
+                        dns_signature(unsafe { SCNetworkProtocolGetConfiguration(protocol.0) })?;
+                }
+                break;
+            }
+        }
+        ensure_dns_matches(&stored, &dns_signature(setup.0)?)?;
+    }
+    Ok(())
+}
+
 pub(super) fn read(resource: &Resource) -> Result<Option<Value>, String> {
     let Resource::MacProxy { service, key } = resource else {
         return Err(failure());
@@ -229,10 +312,14 @@ pub(super) fn write(resource: &Resource, desired: &Option<Value>) -> Result<(), 
         return Err(failure());
     };
     let prefs = Preferences::new()?;
+    // До захвата прав и любой записи отказываемся от глобального ApplyChanges,
+    // если он сотрёт временную DNS-конфигурацию другого приложения.
+    ensure_dns_can_be_reapplied(&prefs)?;
     if !unsafe { SCPreferencesLock(prefs.preferences.0, false) } {
         return Err(failure());
     }
     let result = (|| {
+        ensure_dns_can_be_reapplied(&prefs)?;
         let protocol = prefs.protocol(service)?;
         let config = unsafe { SCNetworkProtocolGetConfiguration(protocol.0) };
         if config.is_null() {
@@ -321,6 +408,7 @@ pub(super) fn enable_system_proxy(
     let one = normalize(plist("<integer>1</integer>"))?;
     let zero = normalize(plist("<integer>0</integer>"))?;
     let prefs = Preferences::new()?;
+    ensure_dns_can_be_reapplied(&prefs)?;
     let services = prefs.services()?;
     let mut journal = Journal::open(default_path()?)?;
     let mut backend = super::SystemSettings;
@@ -422,6 +510,55 @@ pub(super) fn enable_system_proxy(
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn dns(body: &str) -> Option<Value> {
+        dns_signature(deserialize(&plist(body)).unwrap().0).unwrap()
+    }
+
+    #[test]
+    fn temporary_dns_override_is_rejected_without_exposing_values() {
+        let live = dns(
+            "<dict><key>ServerAddresses</key><array><string>vpn-private-value</string></array></dict>",
+        );
+        let error = ensure_dns_matches(&None, &live).unwrap_err();
+        assert!(error.contains("временные DNS"));
+        assert!(!error.contains("vpn-private-value"));
+    }
+
+    #[test]
+    fn stored_dns_and_empty_metadata_are_supported() {
+        let saved = dns(
+            "<dict><key>ServerAddresses</key><array><string>192.0.2.53</string></array></dict>",
+        );
+        assert!(ensure_dns_matches(&saved, &saved).is_ok());
+        assert_eq!(dns("<dict/>"), None);
+        assert_eq!(
+            dns("<dict><key>__FLAGS__</key><integer>2</integer></dict>"),
+            None
+        );
+        assert!(ensure_dns_matches(&None, &None).is_ok());
+    }
+
+    #[test]
+    fn dns_dictionary_order_does_not_create_a_conflict() {
+        let a = dns(
+            "<dict><key>SearchDomains</key><array><string>example.test</string></array><key>ServerAddresses</key><array><string>192.0.2.53</string></array></dict>",
+        );
+        let b = dns(
+            "<dict><key>ServerAddresses</key><array><string>192.0.2.53</string></array><key>SearchDomains</key><array><string>example.test</string></array></dict>",
+        );
+        assert!(ensure_dns_matches(&a, &b).is_ok());
+    }
+
+    #[test]
+    fn unknown_dns_fields_are_preserved_by_refusing_apply() {
+        let stored = dns("<dict><key>Options</key><string>old</string></dict>");
+        let changed = dns(
+            "<dict><key>Options</key><string>old</string><key>FutureVPNField</key><true/></dict>",
+        );
+        assert!(ensure_dns_matches(&stored, &changed).is_err());
+        assert!(ensure_dns_matches(&stored, &None).is_err());
+    }
+
     // Только преобразование данных CoreFoundation; Preferences/сеть не открываются.
     #[test]
     fn plist_types_and_empty_string_roundtrip_without_system_access() {
