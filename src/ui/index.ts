@@ -50,3 +50,5 @@ export { EmptyState } from "./EmptyState";
 export type { EmptyStateProps } from "./EmptyState";
 export { AppHeader } from "./AppHeader";
 export type { AppHeaderProps } from "./AppHeader";
+export { Select } from "./Select";
+export type { SelectProps, SelectOption } from "./Select";

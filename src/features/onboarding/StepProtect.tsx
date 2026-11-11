@@ -38,6 +38,12 @@ export function StepProtect({ sysproxyActive, cliProtected, onToggleSysproxy, on
             trail={<Switch checked={sysproxyActive} onChange={onToggleSysproxy} aria-label={copy.protect.browsers.title} />}
           />
           <Row
+            icon="shield"
+            title={copy.protect.desktopApps.title}
+            sub={copy.protect.desktopApps.sub}
+            trail={<Switch checked={sysproxyActive} onChange={onToggleSysproxy} aria-label={copy.protect.desktopApps.title} />}
+          />
+          <Row
             icon="term"
             title={copy.protect.editors.title}
             sub={copy.protect.editors.sub}

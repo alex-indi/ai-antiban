@@ -17,6 +17,9 @@ import {
   ProfileSwitchResult,
   ProviderId,
   RiskReport,
+  RouteTestResult,
+  RouteView,
+  RoutesSnapshot,
   UpdateCheckResult,
   UpstreamProxyConfig,
 } from "../types";
@@ -37,6 +40,20 @@ let mockState: AppStateData = {
 };
 
 let mockKillswitchStatus = false;
+
+let mockRoutesSnapshot: RoutesSnapshot = {
+  routes: [],
+  provider_routes: {},
+  default_route_id: null,
+  profile_route_id: null,
+  effective: {
+    anthropic: null,
+    openai: null,
+    gemini: null,
+  },
+  profile_route_error: null,
+  dangling: [],
+};
 
 export type MockScenario = "clean" | "turkey" | "ru";
 
@@ -924,4 +941,188 @@ export async function resetCrashTestDrop(): Promise<void> {
   }
   mockCrashTestDropped = false;
   mockCrashTestStep = 0;
+}
+
+// ---- Маршруты (routes) ----
+
+export async function getRoutesSnapshot(): Promise<RoutesSnapshot> {
+  if (isTauri()) {
+    return await invoke<RoutesSnapshot>("list_routes");
+  }
+  return {
+    ...mockRoutesSnapshot,
+    routes: [...mockRoutesSnapshot.routes],
+    provider_routes: { ...mockRoutesSnapshot.provider_routes },
+    effective: { ...mockRoutesSnapshot.effective },
+    dangling: [...mockRoutesSnapshot.dangling],
+  };
+}
+
+export async function upsertRoute(
+  rawKey: string,
+  label?: string | null,
+  setAsDefault?: boolean
+): Promise<RouteView> {
+  if (isTauri()) {
+    const view = await invoke<RouteView>("add_route", { key: rawKey });
+    if (setAsDefault) {
+      await invoke("set_default_route", { routeId: view.id });
+    }
+    return view;
+  }
+
+  const trimmed = rawKey.trim();
+  const id = `r-${Math.random().toString(16).slice(2, 10)}`;
+  const displayLabel =
+    label && label.trim().length > 0
+      ? label.trim()
+      : trimmed.startsWith("zastava://")
+      ? "Ключ Заставы"
+      : trimmed.replace(/^[a-z0-9]+:\/\//i, "").split(/[/@]/)[0] || "Шлюз";
+
+  const newRoute: RouteView = {
+    id,
+    label: displayLabel,
+    country: "NL",
+    exit_ip: "185.212.102.40",
+    expires_at: null,
+    enabled: true,
+    added_at: Math.floor(Date.now() / 1000),
+    entries: [
+      {
+        proto: trimmed.startsWith("socks5")
+          ? "socks5"
+          : trimmed.startsWith("https")
+          ? "https"
+          : "http",
+        host: "185.212.102.40",
+        port: 1080,
+        username: null,
+        has_password: false,
+        sni: null,
+      },
+    ],
+    status: "active",
+    is_default: Boolean(setAsDefault || mockRoutesSnapshot.routes.length === 0),
+    bound_providers: [],
+    is_profile_route: false,
+    health: {
+      reachable: true,
+      last_error: null,
+      observed_exit_ip: "185.212.102.40",
+      observed_country: "NL",
+      exit_ip_matches: true,
+      latency_ms: 32,
+      checked_at: Math.floor(Date.now() / 1000),
+    },
+  };
+
+  mockRoutesSnapshot.routes.push(newRoute);
+  if (newRoute.is_default) {
+    mockRoutesSnapshot.default_route_id = newRoute.id;
+    for (const r of mockRoutesSnapshot.routes) {
+      r.is_default = r.id === newRoute.id;
+    }
+  }
+
+  return newRoute;
+}
+
+export async function removeRoute(routeId: string): Promise<RoutesSnapshot> {
+  if (isTauri()) {
+    return await invoke<RoutesSnapshot>("remove_route", { id: routeId });
+  }
+
+  mockRoutesSnapshot.routes = mockRoutesSnapshot.routes.filter(
+    (r) => r.id !== routeId
+  );
+  if (mockRoutesSnapshot.default_route_id === routeId) {
+    mockRoutesSnapshot.default_route_id = null;
+  }
+  for (const [p, rid] of Object.entries(mockRoutesSnapshot.provider_routes)) {
+    if (rid === routeId) {
+      delete mockRoutesSnapshot.provider_routes[p];
+    }
+  }
+  return getRoutesSnapshot();
+}
+
+export async function setRouteEnabled(
+  routeId: string,
+  enabled: boolean
+): Promise<RoutesSnapshot> {
+  if (isTauri()) {
+    return await invoke<RoutesSnapshot>("set_route_enabled", {
+      id: routeId,
+      enabled,
+    });
+  }
+
+  const r = mockRoutesSnapshot.routes.find((item) => item.id === routeId);
+  if (r) {
+    r.enabled = enabled;
+    r.status = enabled ? "active" : "disabled";
+  }
+  return getRoutesSnapshot();
+}
+
+export async function setDefaultRoute(
+  routeId: string | null
+): Promise<RoutesSnapshot> {
+  if (isTauri()) {
+    return await invoke<RoutesSnapshot>("set_default_route", {
+      routeId,
+    });
+  }
+
+  mockRoutesSnapshot.default_route_id = routeId;
+  for (const r of mockRoutesSnapshot.routes) {
+    r.is_default = r.id === routeId;
+  }
+  return getRoutesSnapshot();
+}
+
+export async function bindProviderRoute(
+  provider: ProviderId,
+  target: string
+): Promise<RoutesSnapshot> {
+  const routeId = target === "direct" || target === "default" ? null : target;
+  if (isTauri()) {
+    return await invoke<RoutesSnapshot>("bind_provider_route", {
+      provider,
+      routeId,
+    });
+  }
+
+  if (!routeId) {
+    delete mockRoutesSnapshot.provider_routes[provider];
+  } else {
+    mockRoutesSnapshot.provider_routes[provider] = routeId;
+  }
+
+  for (const r of mockRoutesSnapshot.routes) {
+    r.bound_providers = Object.entries(mockRoutesSnapshot.provider_routes)
+      .filter(([_, rid]) => rid === r.id)
+      .map(([p]) => p);
+  }
+
+  mockRoutesSnapshot.effective[provider] =
+    routeId ?? mockRoutesSnapshot.default_route_id ?? null;
+
+  return getRoutesSnapshot();
+}
+
+export async function testRoute(rawOrId: string): Promise<RouteTestResult> {
+  if (isTauri()) {
+    return await invoke<RouteTestResult>("test_route", { id: rawOrId });
+  }
+
+  return {
+    ok: true,
+    exit_ip: "185.212.102.40",
+    country: "NL",
+    latency_ms: 38,
+    exit_ip_matches: true,
+    error: null,
+  };
 }

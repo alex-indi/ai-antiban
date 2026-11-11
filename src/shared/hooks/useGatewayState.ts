@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
-import type { AppStateData, ProviderId, RiskReport } from "../../types";
-import { auditConnection, fetchAppState, getSysproxyStatus } from "../../utils/api";
+import type { AppStateData, ProviderId, RiskReport, RoutesSnapshot } from "../../types";
+import { auditConnection, fetchAppState, getRoutesSnapshot, getSysproxyStatus } from "../../utils/api";
 import { toast as t } from "../copy/ru";
 import type { ShowToast } from "./useToasts";
 
@@ -22,13 +22,26 @@ export function useGatewayState({ showToast, refreshGatewayStats }: Options) {
   const [autoUpdateEnabled, setAutoUpdateEnabled] = useState<boolean>(true);
   /** Текст последней ошибки аудита; сбрасывается при успешном проходе. Нужен экрану «нет сети». */
   const [auditError, setAuditError] = useState<string | null>(null);
+  const [routesSnapshot, setRoutesSnapshot] = useState<RoutesSnapshot | null>(null);
 
-  /** Перечитать AppStateData без аудита (тихо: ошибки только в консоль). */
+  /** Получить актуальный снимок маршрутов. */
+  const refreshRoutes = useCallback(async () => {
+    try {
+      const snap = await getRoutesSnapshot();
+      setRoutesSnapshot(snap);
+      return snap;
+    } catch (err) {
+      console.warn("Could not fetch routes snapshot:", err);
+      return null;
+    }
+  }, []);
+
+  /** Перечитать AppStateData и маршруты без аудита (тихо: ошибки только в консоль). */
   const refreshState = useCallback(async () => {
-    const st = await fetchAppState();
+    const [st] = await Promise.all([fetchAppState(), refreshRoutes()]);
     setState(st);
     return st;
-  }, []);
+  }, [refreshRoutes]);
 
   const runFullAudit = useCallback(
     async (force: boolean = false, silentError: boolean = false) => {
@@ -51,6 +64,12 @@ export function useGatewayState({ showToast, refreshGatewayStats }: Options) {
           setSysproxyActive(proxyActive);
         } catch (proxyErr) {
           console.warn("Could not fetch sysproxy status:", proxyErr);
+        }
+
+        try {
+          await refreshRoutes();
+        } catch (routesErr) {
+          console.warn("Could not fetch routes snapshot:", routesErr);
         }
 
         let claudeReport: RiskReport;
@@ -158,6 +177,9 @@ export function useGatewayState({ showToast, refreshGatewayStats }: Options) {
     currentIp,
     currentCountry,
     trustScore,
+    routesSnapshot,
+    setRoutesSnapshot,
+    refreshRoutes,
     refreshState,
     runFullAudit,
   };

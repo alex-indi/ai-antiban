@@ -157,6 +157,12 @@ export function OverviewScreen(props: OverviewScreenProps) {
               trail={<Switch checked={sysproxyActive} onChange={props.onToggleSysproxy} aria-label={copy.browsers.title} />}
             />
             <Row
+              icon="shield"
+              title={copy.desktopApps.title}
+              sub={copy.desktopApps.sub}
+              trail={<Switch checked={sysproxyActive} onChange={props.onToggleSysproxy} aria-label={copy.desktopApps.title} />}
+            />
+            <Row
               icon="term"
               title={copy.editors.title}
               sub={copy.editors.sub}

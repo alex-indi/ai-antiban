@@ -284,9 +284,11 @@ export function AppShell() {
             <TabPanel idPrefix={TAB_PREFIX} id="connect" selected={nav.tab === "connect"} className="zs-stack">
               <ConnectScreen
                 state={gw.state}
+                routesSnapshot={gw.routesSnapshot}
                 currentIp={gw.currentIp}
                 currentCountry={gw.currentCountry}
                 onRefreshState={refreshState}
+                onRefreshRoutes={gw.refreshRoutes}
                 onAuditRefresh={() => runFullAudit(true)}
                 onOpenGuide={nav.openGuide}
                 onToast={showToast}

@@ -45,7 +45,8 @@ export const overview = {
     checking: "Проверяем",
   },
   browsers: { title: "Браузеры", sub: "Chrome, Safari, Arc, Edge, Яндекс" },
-  editors: { title: "Редакторы кода и CLI", sub: "VS Code, Cursor, Windsurf, терминал" },
+  desktopApps: { title: "Десктопные приложения", sub: "Claude Desktop, ChatGPT Desktop" },
+  editors: { title: "IDE и терминал", sub: "Antigravity, Cursor, VS Code, Windsurf, Claude Code, Gemini CLI" },
   stats: {
     requests: "запросов к ИИ проверено",
     leaks: "утечек остановлено",
