@@ -26,6 +26,7 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             // Register panic guard and OS termination signal watcher for systemic proxy clean-up
             sysproxy::register_clean_exit_guard();
@@ -283,7 +284,7 @@ fn spawn_update_checker(app: &tauri::App, app_state: &state::AppState) {
         tokio::time::sleep(Duration::from_secs(20)).await;
         loop {
             if updater_state.get_data().await.auto_update_enabled {
-                if let Ok(res) = updater::check_github_updates().await {
+                if let Ok(res) = updater::check_for_updates(Some(&updater_app_handle)).await {
                     if res.update_available {
                         let _ = updater_app_handle.emit("updater://available", &res);
                         if let Some(tray) = updater_app_handle.tray_by_id(MAIN_TRAY_ID) {

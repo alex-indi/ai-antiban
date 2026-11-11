@@ -3,8 +3,8 @@
 use crate::{state, updater};
 
 #[tauri::command]
-pub async fn check_for_updates() -> Result<updater::UpdateCheckResult, String> {
-    updater::check_github_updates().await
+pub async fn check_for_updates(app: tauri::AppHandle) -> Result<updater::UpdateCheckResult, String> {
+    updater::check_for_updates(Some(&app)).await
 }
 
 #[tauri::command]
@@ -13,7 +13,7 @@ pub async fn install_update(
     asset_name: String,
     app: tauri::AppHandle,
 ) -> Result<updater::InstallUpdateResult, String> {
-    updater::download_and_install_update(&app, &download_url, &asset_name).await
+    updater::install_update(&app, &download_url, &asset_name).await
 }
 
 #[tauri::command]

@@ -200,12 +200,197 @@ pub async fn check_github_updates() -> Result<UpdateCheckResult, String> {
     })
 }
 
-/// Downloads the release artifact from GitHub and executes automatic installation.
-pub async fn download_and_install_update(
+/// Hybrid update checker:
+/// 1. Tries `tauri-plugin-updater` with minisign signature check against `latest.json`.
+/// 2. If `latest.json` is missing or check fails, falls back to GitHub Releases API.
+pub async fn check_for_updates(app: Option<&tauri::AppHandle>) -> Result<UpdateCheckResult, String> {
+    if let Some(app) = app {
+        use tauri_plugin_updater::UpdaterExt;
+        if let Ok(updater) = app.updater() {
+            match updater.check().await {
+                Ok(Some(update)) => {
+                    let latest_clean = update
+                        .version
+                        .trim()
+                        .trim_start_matches(['v', 'V'])
+                        .to_string();
+                    let update_available = is_newer_version(CURRENT_VERSION, &latest_clean);
+                    let download_url = update.download_url.to_string();
+                    let asset_name = update
+                        .download_url
+                        .path_segments()
+                        .and_then(|mut s| s.next_back())
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| "update.tar.gz".to_string());
+
+                    return Ok(UpdateCheckResult {
+                        current_version: CURRENT_VERSION.to_string(),
+                        latest_version: latest_clean.clone(),
+                        update_available,
+                        release_name: format!("Zastava v{latest_clean}"),
+                        release_notes: update
+                            .body
+                            .clone()
+                            .unwrap_or_else(|| "Официальная подписанная сборка Zastava (minisign).".to_string()),
+                        release_url: format!("https://github.com/{GITHUB_REPO}/releases/tag/v{latest_clean}"),
+                        published_at: update.date.map(|d| d.to_string()),
+                        download_url: Some(download_url),
+                        asset_name: Some(asset_name),
+                        asset_size: None,
+                    });
+                }
+                Ok(None) => {
+                    return Ok(UpdateCheckResult {
+                        current_version: CURRENT_VERSION.to_string(),
+                        latest_version: CURRENT_VERSION.to_string(),
+                        update_available: false,
+                        release_name: format!("Zastava v{CURRENT_VERSION}"),
+                        release_notes: "У вас установлена актуальная подписанная версия Заставы.".to_string(),
+                        release_url: format!("https://github.com/{GITHUB_REPO}/releases/latest"),
+                        published_at: None,
+                        download_url: None,
+                        asset_name: None,
+                        asset_size: None,
+                    });
+                }
+                Err(e) => {
+                    eprintln!("[updater] tauri-plugin-updater check failed: {e}, falling back to GitHub API");
+                }
+            }
+        }
+    }
+
+    check_github_updates().await
+}
+
+async fn try_signed_updater(app: &tauri::AppHandle) -> Result<InstallUpdateResult, String> {
+    use tauri_plugin_updater::UpdaterExt;
+
+    let updater = app
+        .updater()
+        .map_err(|e| format!("Не удалось инициализировать tauri-plugin-updater: {e}"))?;
+
+    let update = updater
+        .check()
+        .await
+        .map_err(|e| format!("Ошибка проверки latest.json: {e}"))?
+        .ok_or_else(|| "Нет доступных подписанных обновлений в latest.json".to_string())?;
+
+    let _ = app.emit(
+        "updater://status",
+        UpdateStatusPayload {
+            stage: "downloading".to_string(),
+            message: format!("Скачивание подписанного пакета v{} (minisign)...", update.version),
+        },
+    );
+
+    let _ = app.emit(
+        "updater://progress",
+        UpdateProgressPayload {
+            downloaded_bytes: 0,
+            total_bytes: 0,
+            percent: 5,
+            phase: "Подключение к репозиторию релизов...".to_string(),
+        },
+    );
+
+    let downloaded_bytes = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let total_bytes_atomic = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+
+    let app_chunks = app.clone();
+    let dl_chunks = downloaded_bytes.clone();
+    let total_chunks = total_bytes_atomic.clone();
+
+    let app_finish = app.clone();
+    let total_finish = total_bytes_atomic.clone();
+
+    update
+        .download_and_install(
+            move |chunk_length, content_length| {
+                let dl = dl_chunks.fetch_add(chunk_length as u64, std::sync::atomic::Ordering::Relaxed)
+                    + chunk_length as u64;
+                let total = if let Some(tot) = content_length {
+                    total_chunks.store(tot, std::sync::atomic::Ordering::Relaxed);
+                    tot
+                } else {
+                    total_chunks.load(std::sync::atomic::Ordering::Relaxed)
+                };
+                let percent = if total > 0 {
+                    ((dl as f64 / total as f64) * 85.0).clamp(5.0, 90.0) as u8
+                } else {
+                    50
+                };
+                let _ = app_chunks.emit(
+                    "updater://progress",
+                    UpdateProgressPayload {
+                        downloaded_bytes: dl,
+                        total_bytes: total,
+                        percent,
+                        phase: "Скачивание и проверка подписи minisign...".to_string(),
+                    },
+                );
+            },
+            move || {
+                let total = total_finish.load(std::sync::atomic::Ordering::Relaxed);
+                crate::sysproxy::disable_all_sysproxy();
+                let _ = app_finish.emit(
+                    "updater://progress",
+                    UpdateProgressPayload {
+                        downloaded_bytes: total,
+                        total_bytes: total,
+                        percent: 95,
+                        phase: "Подпись проверена, распаковка и установка...".to_string(),
+                    },
+                );
+            },
+        )
+        .await
+        .map_err(|e| format!("Ошибка загрузки/установки подписанного пакета: {e}"))?;
+
+    let _ = app.emit(
+        "updater://progress",
+        UpdateProgressPayload {
+            downloaded_bytes: 100,
+            total_bytes: 100,
+            percent: 100,
+            phase: "Перезапуск Заставы...".to_string(),
+        },
+    );
+
+    let _ = app.emit(
+        "updater://status",
+        UpdateStatusPayload {
+            stage: "installing".to_string(),
+            message: "Подписанное обновление проверено и установлено!".to_string(),
+        },
+    );
+
+    let app_clone = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        crate::sysproxy::disable_all_sysproxy();
+        app_clone.restart();
+    });
+
+    Ok(InstallUpdateResult {
+        success: true,
+        message: format!(
+            "Подписанное обновление v{} проверено (minisign) и установлено! Застава сейчас перезапустится.",
+            update.version
+        ),
+        will_restart: true,
+    })
+}
+
+/// Fallback legacy downloader: downloads directly from GitHub Releases and applies platform-specific installation.
+pub async fn download_and_install_legacy(
     app: &tauri::AppHandle,
     download_url: &str,
     asset_name: &str,
 ) -> Result<InstallUpdateResult, String> {
+    if download_url.trim().is_empty() {
+        return Err("Не указан URL для загрузки обновления.".to_string());
+    }
     validate_download_url(download_url)?;
     let safe_name = sanitize_asset_filename(asset_name)?;
 
@@ -302,6 +487,33 @@ pub async fn download_and_install_update(
     );
 
     apply_platform_update(app, &update_dir, &target_file, &safe_name)
+}
+
+/// Hybrid update installer:
+/// 1. Tries signed update via `tauri-plugin-updater` with minisign signature check against `latest.json`.
+/// 2. If `latest.json` is missing/inaccessible or signed artifact is unavailable, cleanly falls back
+///    to direct verified download of release assets (.dmg / -setup.exe / .app.tar.gz) from GitHub Releases.
+pub async fn download_and_install_update(
+    app: &tauri::AppHandle,
+    download_url: &str,
+    asset_name: &str,
+) -> Result<InstallUpdateResult, String> {
+    match try_signed_updater(app).await {
+        Ok(res) => Ok(res),
+        Err(err) => {
+            eprintln!("[updater] Штатный tauri-plugin-updater недоступен ({err}), откат на прямой fallback-загрузчик GitHub Releases");
+            download_and_install_legacy(app, download_url, asset_name).await
+        }
+    }
+}
+
+/// Alias for `download_and_install_update` for full backward and forward compatibility.
+pub async fn install_update(
+    app: &tauri::AppHandle,
+    download_url: &str,
+    asset_name: &str,
+) -> Result<InstallUpdateResult, String> {
+    download_and_install_update(app, download_url, asset_name).await
 }
 
 #[cfg(target_os = "macos")]
@@ -563,10 +775,15 @@ mod tests {
 
     #[test]
     fn test_semver_comparison() {
+        assert_eq!(CURRENT_VERSION, "2.0.0");
         assert!(is_newer_version("1.0.3", "1.0.4"));
         assert!(is_newer_version("v1.0.3", "v1.0.4"));
         assert!(is_newer_version("1.0.3", "1.1.0"));
         assert!(is_newer_version("1.0.3", "2.0.0"));
+        assert!(is_newer_version("2.0.0", "2.0.1"));
+        assert!(is_newer_version("2.0.0", "2.1.0"));
+        assert!(!is_newer_version("2.0.0", "2.0.0"));
+        assert!(!is_newer_version("2.0.0", "1.3.1"));
         assert!(!is_newer_version("1.0.4", "1.0.4"));
         assert!(!is_newer_version("1.0.4", "1.0.3"));
         assert!(is_newer_version("1.0.3", "1.0.10"));
