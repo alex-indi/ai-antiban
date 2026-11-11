@@ -17,6 +17,9 @@ pub fn show_and_position_alert_popup(app: &tauri::AppHandle) {
         if let Ok(Some(monitor)) = popup.primary_monitor() {
             let scale = monitor.scale_factor();
             let mon_size = monitor.size();
+            // Must match the alert-popup width in tauri.conf.json (440x330). Only the width
+            // matters here: the window is anchored to the top edge, so the height does not
+            // affect the position.
             let win_width = 440.0;
             let mon_width = mon_size.width as f64 / scale;
 
