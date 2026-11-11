@@ -1,4 +1,4 @@
-import { GuideViewer } from "../../components/GuideViewer";
+import { GuidesScreen } from "../guides";
 import type { ShowToast } from "../../shared/hooks";
 
 interface GuidesTabProps {
@@ -9,7 +9,7 @@ interface GuidesTabProps {
   onToast: ShowToast;
 }
 
-/** Вкладка «Гайды»: прежний GuideViewer без переделки. */
+/** Вкладка «Гайды»: экран на дизайн-системе (src/features/guides). */
 export function GuidesTab(props: GuidesTabProps) {
-  return <GuideViewer {...props} />;
+  return <GuidesScreen {...props} />;
 }

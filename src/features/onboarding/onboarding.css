@@ -1,0 +1,19 @@
+/* Онбординг первого запуска. Только токены ДС: фон bg-0, слои bg-1, поля space-*, без рамок, свечений и градиентов.
+   Слой z-index 40 лежит выше меню (30) и ниже демо-диалога (50) и уведомлений (60). */
+.zs-onb{position:fixed;inset:0;z-index:40;display:flex;justify-content:center;background:var(--bg-0)}
+.zs-onb:focus{outline:none}
+.zs-onb__panel{display:flex;flex-direction:column;width:100%;max-width:460px;height:100%;min-height:0}
+.zs-onb__head{display:flex;align-items:flex-end;gap:var(--space-3);padding:var(--space-4) var(--space-4) var(--space-2)}
+.zs-onb__head .zs-progress{flex:1;min-width:0}
+.zs-onb__step{display:flex;flex-direction:column;flex:1;min-height:0}
+.zs-onb__body{flex:1;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:var(--space-4);padding:var(--space-2) var(--space-4) var(--space-4)}
+.zs-onb__intro{display:flex;flex-direction:column;gap:var(--space-2)}
+.zs-onb__title{margin:0}
+.zs-root .zs-onb__title:focus,.zs-root .zs-onb__title:focus-visible{outline:none}
+.zs-onb__lead{margin:0;color:var(--ink-2)}
+.zs-onb__note{margin:0;color:var(--ink-2);font-size:12px;line-height:16px}
+.zs-onb__result{display:flex;flex-direction:column;gap:var(--space-3)}
+.zs-onb__foot{display:flex;flex-direction:column;gap:var(--space-2);padding:var(--space-3) var(--space-4) var(--space-4);background:var(--bg-0)}
+.zs-onb__foot-row{display:flex;align-items:center;justify-content:space-between;gap:var(--space-2)}
+.zs-onb__foot--inline{flex-direction:row;align-items:center}
+.zs-onb__foot--inline .zs-onb__primary{flex:1;min-width:0}

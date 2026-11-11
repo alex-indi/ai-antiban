@@ -23,6 +23,7 @@ import { openTelegramSupport } from "../utils/opener";
 import { OverviewScreen } from "../features/overview/OverviewScreen";
 import { ConnectScreen } from "../features/connect/ConnectScreen";
 import { AlertOverlay } from "../features/alert";
+import { OnboardingFlow, useOnboarding } from "../features/onboarding";
 import {
   BackupTab,
   ChecksTab,
@@ -50,6 +51,7 @@ const TAB_PREFIX = "app";
 /** Оболочка главного окна: шапка с меню «Ещё», вкладки, активный экран, футер и все общие диалоги. */
 export function AppShell() {
   const nav = useNavigation();
+  const onboarding = useOnboarding();
   const { toasts, showToast, dismissToast } = useToasts();
 
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -157,8 +159,7 @@ export function AppShell() {
       {
         id: "onboarding",
         label: copy.menu.onboarding,
-        // Заглушка: настоящее знакомство появится в следующей волне.
-        onSelect: () => showToast(copy.toast.onboardingSoon, copy.toast.onboardingSoonText, "info"),
+        onSelect: onboarding.start,
       },
       { id: "support", label: copy.menu.support, onSelect: handleOpenSupport },
       { id: "about", label: copy.menu.about, onSelect: () => setAboutOpen(true) },
@@ -188,7 +189,7 @@ export function AppShell() {
     }
     return items;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [gw.refreshing, updater.checkingUpdate, updater.updateInfo, mock.scenario, runFullAudit, nav.openSubscription]);
+  }, [gw.refreshing, updater.checkingUpdate, updater.updateInfo, mock.scenario, runFullAudit, nav.openSubscription, onboarding.start]);
 
   const payload = intercept.interceptPayload;
 
@@ -376,6 +377,29 @@ export function AppShell() {
       />
       <AboutModal open={aboutOpen} onClose={() => setAboutOpen(false)} version={version} onSupport={handleOpenSupport} />
       <EventsModal open={eventsOpen} onClose={() => setEventsOpen(false)} stats={stats.gatewayStats} />
+
+      {/* Знакомство с Заставой: первый запуск новой версии или «Ещё» → «Пройти знакомство заново» */}
+      {onboarding.open && (
+        <OnboardingFlow
+          key={onboarding.run}
+          initialStep={onboarding.initialStep}
+          reports={gw.reports}
+          activeReport={gw.activeReport}
+          refreshing={gw.refreshing}
+          auditError={gw.auditError}
+          currentIp={gw.currentIp}
+          trustScore={gw.trustScore}
+          sysproxyActive={gw.sysproxyActive}
+          cliProtected={toggles.cliProtected}
+          onToggleSysproxy={toggles.handleToggleSysproxy}
+          onToggleCli={toggles.handleToggleCliProtection}
+          onRecheck={() => runFullAudit(true, true)}
+          onClose={(to) => {
+            onboarding.finish();
+            if (to) nav.goTab(to);
+          }}
+        />
+      )}
 
       {/* Превью диалога обрыва в браузере (без Tauri) */}
       {!isTauri() && (browserSimulation || payload) && (

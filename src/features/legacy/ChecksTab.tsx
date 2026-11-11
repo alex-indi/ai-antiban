@@ -1,5 +1,5 @@
 import type { AppStateData, RiskReport } from "../../types";
-import { DeepAuditTab } from "../../components/DeepAuditTab";
+import { ChecksScreen } from "../checks";
 
 interface ChecksTabProps {
   report: RiskReport | null;
@@ -9,9 +9,12 @@ interface ChecksTabProps {
   onPinCurrentIp: (ip: string) => void;
   onSyncTimezone: () => void;
   onOpenCrashTest: () => void;
+  /** Новое: повторный аудит. Пока оболочка его не передаёт, кнопка «Перепроверить» скрыта. */
+  onRecheck?: () => void;
+  rechecking?: boolean;
 }
 
-/** Вкладка «Проверки»: прежний DeepAuditTab без переделки. Перерисует следующая волна. */
+/** Вкладка «Проверки»: точка подключения нового экрана features/checks. */
 export function ChecksTab(props: ChecksTabProps) {
-  return <DeepAuditTab {...props} />;
+  return <ChecksScreen {...props} />;
 }

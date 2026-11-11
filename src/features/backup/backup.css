@@ -1,0 +1,10 @@
+/* Экран «Бэкап»: только токены ДС. */
+.zs-backup__actions{display:flex;flex-direction:column;gap:var(--space-2);margin-top:var(--space-3)}
+.zs-backup__text{margin:0 0 var(--space-3);color:var(--ink-2)}
+.zs-backup__block{margin-top:var(--space-3)}
+.zs-backup__block+.zs-backup__block{margin-top:var(--space-3)}
+.zs-path{display:block;margin-top:var(--space-1);color:var(--ink);overflow-wrap:anywhere}
+.zs-profile__name{display:flex;flex-wrap:wrap;align-items:center;gap:var(--space-2)}
+.zs-profile__sub{overflow-wrap:anywhere}
+.zs-backup__create{display:flex;flex-direction:column;gap:var(--space-3);margin:0}
+.zs-backup__create .zs-row{padding-left:0;padding-right:0}

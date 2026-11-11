@@ -1,4 +1,4 @@
-import { VpnCrashTestModal } from "../../components/VpnCrashTestModal";
+import { CrashTestModal } from "../crash-test";
 import type { ShowToast } from "../../shared/hooks";
 
 interface CrashTestDialogProps {
@@ -7,7 +7,7 @@ interface CrashTestDialogProps {
   onToast: ShowToast;
 }
 
-/** Тест обрыва VPN: прежний VpnCrashTestModal как есть. */
+/** Тест обрыва VPN: точка подключения нового окна features/crash-test. */
 export function CrashTestDialog({ open, onClose, onToast }: CrashTestDialogProps) {
-  return <VpnCrashTestModal isOpen={open} onClose={onClose} onToast={onToast} />;
+  return <CrashTestModal open={open} onClose={onClose} onToast={onToast} />;
 }

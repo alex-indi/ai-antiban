@@ -1,0 +1,26 @@
+/* Экран «Проверки»: только токены ДС. Раскрывающаяся строка и вердикт собраны здесь, в src/ui их нет. */
+.zs-verdict__head{display:flex;align-items:flex-start;justify-content:space-between;gap:var(--space-3)}
+.zs-verdict__body{flex:1;min-width:0}
+.zs-verdict__title{margin:var(--space-2) 0 0;font-size:20px;line-height:26px;font-weight:600;letter-spacing:-.01em}
+.zs-verdict__text{margin:var(--space-1) 0 0;font-size:13px;line-height:18px;color:var(--ink-2)}
+.zs-verdict__action{flex:none}
+@media (max-width:420px){.zs-verdict__head{flex-direction:column}}
+
+.zs-check{border-top:1px solid var(--line)}
+.zs-check:first-child{border-top:0}
+.zs-check__head{display:flex;align-items:center;gap:var(--space-3);width:100%;margin:0;padding:var(--space-3) 0;border:0;background:none;color:inherit;font:inherit;text-align:left;cursor:pointer;border-radius:var(--radius-md)}
+.zs-check:first-child .zs-check__head{padding-top:var(--space-1)}
+.zs-check:last-child .zs-check__head{padding-bottom:var(--space-1)}
+.zs-check__head .zs-row__title{display:block;margin:0;font-weight:500}
+.zs-check__head .zs-row__sub{display:block}
+.zs-check__chev{transition:transform .12s ease}
+.zs-check__head[aria-expanded=true] .zs-check__chev{transform:rotate(90deg)}
+@media (prefers-reduced-motion:reduce){.zs-check__chev{transition:none}}
+.zs-check__detail{display:flex;flex-direction:column;gap:var(--space-3);margin:var(--space-1) 0 var(--space-3) calc(32px + var(--space-3));padding:var(--space-3);border-radius:var(--radius-md);background:var(--bg-2)}
+.zs-check__label{margin:0;font-size:12px;line-height:16px;color:var(--ink-3)}
+.zs-check__message{margin:2px 0 0;font-size:13px;line-height:18px;color:var(--ink-2)}
+.zs-check__data{display:grid;grid-template-columns:auto minmax(0,1fr);gap:var(--space-1) var(--space-3);margin:0}
+.zs-check__data dt{font-size:12px;line-height:18px;color:var(--ink-3)}
+.zs-check__data dd{margin:0;min-width:0;font-size:13px;line-height:18px;color:var(--ink);overflow-wrap:anywhere}
+.zs-check__actions{display:flex;flex-wrap:wrap;align-items:center;gap:var(--space-3)}
+.zs-check__pair{display:contents}

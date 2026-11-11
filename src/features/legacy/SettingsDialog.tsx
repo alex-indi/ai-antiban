@@ -1,4 +1,4 @@
-import { SettingsModal } from "../../components/SettingsModal";
+import { SettingsModal } from "../settings";
 import type { AppStateData } from "../../types";
 import type { ShowToast } from "../../shared/hooks";
 
@@ -12,7 +12,7 @@ interface SettingsDialogProps {
   onToast: ShowToast;
 }
 
-/** Настройки: прежний SettingsModal как есть. Его onToast говорит «warn», оболочка — «warning». */
+/** Настройки: точка подключения нового окна features/settings. Его onToast говорит «warn», оболочка — «warning». */
 export function SettingsDialog({
   open,
   onClose,
@@ -24,7 +24,7 @@ export function SettingsDialog({
 }: SettingsDialogProps) {
   return (
     <SettingsModal
-      isOpen={open}
+      open={open}
       onClose={onClose}
       autoUpdateEnabled={autoUpdateEnabled}
       onToggleAutoUpdate={onToggleAutoUpdate}

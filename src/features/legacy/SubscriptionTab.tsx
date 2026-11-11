@@ -1,5 +1,5 @@
 import type { AppStateData, RiskReport } from "../../types";
-import { BinCheckerTab } from "../../components/BinCheckerTab";
+import { SubscriptionScreen } from "../subscription";
 import type { ShowToast } from "../../shared/hooks";
 
 interface SubscriptionTabProps {
@@ -11,7 +11,7 @@ interface SubscriptionTabProps {
   onToast: ShowToast;
 }
 
-/** Экран «Подписка» (меню «Ещё»): прежний BinCheckerTab без переделки. */
+/** Экран «Подписка» (меню «Ещё»): экран на дизайн-системе (src/features/subscription). */
 export function SubscriptionTab(props: SubscriptionTabProps) {
-  return <BinCheckerTab {...props} />;
+  return <SubscriptionScreen {...props} />;
 }

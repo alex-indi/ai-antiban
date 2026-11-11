@@ -1,0 +1,44 @@
+/* Гайды: только токены. Блок команды и вспомогательная вёрстка шагов; всё остальное — примитивы src/ui. */
+
+/* Блок команды или адреса: слой bg-2 внутри карточки, моноширинный текст, кнопка «Скопировать» */
+.guides-code{display:flex;flex-direction:column;gap:var(--space-2);margin:var(--space-2) 0;padding:var(--space-3);border-radius:var(--radius-md);background:var(--bg-2)}
+.guides-code__text{margin:0;font-family:var(--font-mono);font-size:13px;line-height:18px;font-weight:500;color:var(--ink);white-space:pre-wrap;word-break:break-all;user-select:all}
+.guides-code__foot{display:flex;justify-content:flex-end}
+
+/* Подписи и абзацы внутри карточек и шагов */
+.guides-lead{margin:0 0 var(--space-3);color:var(--ink-2)}
+.guides-lead:last-child{margin-bottom:0}
+.guides-lead strong{color:var(--ink);font-weight:600}
+.guides-label{margin:var(--space-3) 0 0;font-size:13px;line-height:18px;font-weight:600;color:var(--ink)}
+.guides-note{margin:var(--space-2) 0 0;font-size:13px;line-height:18px;color:var(--ink-2)}
+.guides-note--tight{margin:calc(-1 * var(--space-1)) 0 var(--space-3)}
+.guides-way{display:flex;flex-direction:column;align-items:flex-start;gap:var(--space-2);margin-top:var(--space-4)}
+.guides-way>.guides-label{margin-top:0}
+.guides-way>.guides-lead,.guides-way>.guides-note{margin:0}
+.guides-way>.guides-code{align-self:stretch}
+.guides-list{margin:0;padding-left:var(--space-5);list-style:decimal;color:var(--ink-2)}
+.guides-list li+li{margin-top:var(--space-2)}
+
+/* Шаги: заголовок — кнопка раскрытия, содержимое раскрытого шага */
+.guides-step__toggle{display:block;width:100%;min-height:28px;margin:0;padding:0;border:0;background:none;color:inherit;font:inherit;font-weight:600;text-align:left;cursor:pointer;border-radius:var(--radius-sm)}
+.guides-step__toggle:hover{color:var(--ink-2)}
+.guides-step__panel{display:flex;flex-direction:column;gap:var(--space-2);margin-top:var(--space-2)}
+.guides-step__panel>.zs-btn{align-self:flex-start}
+.guides-step__panel>.zs-rows{margin-top:var(--space-1)}
+
+/* Письмо хостинга: заголовок с бейджем и строки данных */
+.guides-mail{margin-top:var(--space-2);padding:var(--space-3);border-radius:var(--radius-md);background:var(--bg-2)}
+.guides-mail__head{display:flex;align-items:center;justify-content:space-between;gap:var(--space-3);margin-bottom:var(--space-1)}
+.guides-mail .guides-label{margin:0}
+.guides-mail .zs-row__trail{color:var(--ink)}
+
+/* Карточки хостингов и сервисов карт: строка с переходом, описание, бейджи, промокод */
+.guides-offers{margin:0;padding:0;list-style:none}
+.guides-offer{display:flex;flex-direction:column;gap:var(--space-2);padding:var(--space-3) 0;border-top:1px solid var(--line)}
+.guides-offer:first-child{border-top:0;padding-top:var(--space-1)}
+.guides-offer:last-child{padding-bottom:var(--space-1)}
+.guides-offer .zs-row:first-child{padding:0}
+.guides-offer__text{margin:0;font-size:13px;line-height:18px;color:var(--ink-2)}
+.guides-offer__facts{margin:0;font-size:13px;line-height:18px;color:var(--ink-2)}
+.guides-offer__facts strong{color:var(--ink);font-weight:600}
+.guides-offer__chips,.guides-offer__meta{display:flex;flex-wrap:wrap;align-items:center;gap:var(--space-2)}
