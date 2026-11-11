@@ -1,16 +1,26 @@
 import { useEffect, useState } from "react";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { isTauri } from "@tauri-apps/api/core";
-import { Dashboard } from "./components/Dashboard";
-import { AlertPopup } from "./components/AlertPopup";
+import { AppShell } from "./app/AppShell";
+import { AlertWindowPage } from "./features/alert";
 import "./App.css";
 
+/** Окно alert-popup по URL известно сразу: главное окно в нём даже не монтируем. */
+function labelFromUrl(): string {
+  const winParam = new URLSearchParams(window.location.search).get("window");
+  const isAlert =
+    winParam === "alert-popup" ||
+    winParam === "alert" ||
+    window.location.hash === "#alert-popup" ||
+    window.location.hash === "#alert";
+  return isAlert ? "alert-popup" : "main";
+}
+
 function App() {
-  const [windowLabel, setWindowLabel] = useState<string>("main");
-  const [showBrowserSimulation, setShowBrowserSimulation] = useState<boolean>(false);
+  const [windowLabel, setWindowLabel] = useState<string>(labelFromUrl);
 
   useEffect(() => {
-    // 1. Check URL parameters / hash (e.g. ?window=alert-popup or #alert or #alert-popup)
+    // 1. Параметры URL / hash (например, ?window=alert-popup или #alert, #alert-popup)
     const params = new URLSearchParams(window.location.search);
     const winParam = params.get("window");
     if (
@@ -23,7 +33,7 @@ function App() {
       return;
     }
 
-    // 2. In Tauri environment, inspect WebviewWindow label
+    // 2. В Tauri смотрим метку окна
     if (isTauri()) {
       try {
         const win = getCurrentWebviewWindow();
@@ -51,36 +61,12 @@ function App() {
     }
   }, [windowLabel]);
 
-  // When current window is alert-popup, render dedicated Dynamic Island Notch HUD popup
+  // Окно alert-popup: диалог обрыва VPN на прозрачном фоне
   if (windowLabel === "alert-popup") {
-    return (
-      <div className="w-full h-screen bg-transparent overflow-hidden flex items-start justify-center p-0 m-0">
-        <AlertPopup />
-      </div>
-    );
+    return <AlertWindowPage />;
   }
 
-  return (
-    <div className="w-full min-h-screen bg-[#0A0B0E] flex items-center justify-center">
-      <Dashboard onSimulateInBrowser={() => setShowBrowserSimulation(true)} />
-
-      {/* Browser Dev simulation overlay */}
-      {showBrowserSimulation && !isTauri() && (
-        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="relative">
-            <button
-              type="button"
-              onClick={() => setShowBrowserSimulation(false)}
-              className="absolute -top-3 -right-3 z-50 w-6 h-6 rounded-full bg-zinc-800 text-zinc-300 hover:text-white border border-white/[0.1] flex items-center justify-center text-xs font-mono cursor-pointer"
-            >
-              ✕
-            </button>
-            <AlertPopup onResolved={() => setShowBrowserSimulation(false)} />
-          </div>
-        </div>
-      )}
-    </div>
-  );
+  return <AppShell />;
 }
 
 export default App;

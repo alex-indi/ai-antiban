@@ -1,0 +1,396 @@
+import { useEffect, useMemo, useState } from "react";
+import { isTauri } from "@tauri-apps/api/core";
+import { AppHeader, Banner, Button, Mono, TabPanel, Tabs, Toast, ToastViewport } from "../ui";
+import type { MenuEntry, TabItem } from "../ui";
+import { shell as copy, tabs as tabCopy } from "../shared/copy/ru";
+import { APP_VERSION } from "../shared/version";
+import {
+  useClaudeBackup,
+  useGatewayState,
+  useGatewayStats,
+  useInterception,
+  useMockScenario,
+  useNavigation,
+  usePinning,
+  useProtectionToggles,
+  useTimezoneSync,
+  useToasts,
+  useTrayEvents,
+  useUpdater,
+} from "../shared/hooks";
+import type { TabId } from "../shared/hooks";
+import { openTelegramSupport } from "../utils/opener";
+import { OverviewScreen } from "../features/overview/OverviewScreen";
+import { ConnectScreen } from "../features/connect/ConnectScreen";
+import { AlertOverlay } from "../features/alert";
+import {
+  BackupTab,
+  ChecksTab,
+  CrashTestDialog,
+  GuidesTab,
+  SettingsDialog,
+  SubscriptionTab,
+} from "../features/legacy";
+import { AboutModal } from "./AboutModal";
+import { EventsModal } from "./EventsModal";
+import { TimezoneModal } from "./TimezoneModal";
+import { UpdateModal } from "./UpdateModal";
+import "./shell.css";
+
+const TAB_ITEMS: TabItem<TabId>[] = [
+  { id: "overview", label: tabCopy.overview },
+  { id: "connect", label: tabCopy.connect },
+  { id: "checks", label: tabCopy.checks },
+  { id: "backup", label: tabCopy.backup },
+  { id: "guides", label: tabCopy.guides },
+];
+
+const TAB_PREFIX = "app";
+
+/** Оболочка главного окна: шапка с меню «Ещё», вкладки, активный экран, футер и все общие диалоги. */
+export function AppShell() {
+  const nav = useNavigation();
+  const { toasts, showToast, dismissToast } = useToasts();
+
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [crashTestOpen, setCrashTestOpen] = useState(false);
+  const [timezoneOpen, setTimezoneOpen] = useState(false);
+  const [aboutOpen, setAboutOpen] = useState(false);
+  const [eventsOpen, setEventsOpen] = useState(false);
+  const [browserSimulation, setBrowserSimulation] = useState(false);
+
+  // ---- Состояние и действия, вынесенные из старого Dashboard ----
+  const stats = useGatewayStats(nav.tab === "overview" && !nav.subscriptionOpen);
+  const gw = useGatewayState({ showToast, refreshGatewayStats: stats.refreshGatewayStats });
+  const { runFullAudit, refreshState } = gw;
+  const toggles = useProtectionToggles({
+    sysproxyActive: gw.sysproxyActive,
+    setSysproxyActive: gw.setSysproxyActive,
+    showToast,
+  });
+  const pinning = usePinning({
+    state: gw.state,
+    refreshState,
+    runFullAudit,
+    showToast,
+    currentIp: gw.currentIp,
+  });
+  const tz = useTimezoneSync({ activeReport: gw.activeReport, runFullAudit, showToast });
+  const updater = useUpdater({ showToast, setAutoUpdateEnabled: gw.setAutoUpdateEnabled });
+  const intercept = useInterception({
+    runFullAudit,
+    showToast,
+    onSimulateInBrowser: () => setBrowserSimulation(true),
+  });
+  const backup = useClaudeBackup(showToast);
+  const mock = useMockScenario(runFullAudit);
+
+  useTrayEvents({
+    showToast,
+    openGuide: nav.openGuide,
+    openBackup: () => nav.goTab("backup"),
+    runFullAudit,
+    refreshState,
+    checkUpdates: updater.handleCheckUpdates,
+    syncTimezone: () => tz.handleSyncTz(),
+    exportClaude: backup.handleExportClaude,
+    openCrashTest: () => setCrashTestOpen(true),
+    setKillswitchFrozen: toggles.setKillswitchFrozen,
+    setInterceptPayload: intercept.setInterceptPayload,
+    applyUpdateProgress: updater.applyUpdateProgress,
+    applyUpdateAvailable: updater.applyUpdateAvailable,
+    applyUpdateStatus: updater.applyUpdateStatus,
+  });
+
+  // Ленивая загрузка вкладок: «Бэкап» сканирует ~/.claude, «Проверки» ждут первый отчёт.
+  useEffect(() => {
+    if (nav.tab === "backup" && !backup.claudeSummary) {
+      backup.loadClaudeSummary();
+    }
+    if (nav.tab === "checks" && !gw.reports.anthropic && !gw.refreshing) {
+      runFullAudit(true, true);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [nav.tab, backup.claudeSummary, gw.reports.anthropic, gw.refreshing]);
+
+  const version = updater.updateInfo?.current_version || APP_VERSION;
+
+  const handleOpenSupport = async () => {
+    showToast(copy.toast.supportTitle, copy.toast.supportText, "info");
+    await openTelegramSupport();
+  };
+
+  const handleOpenOsClock = async () => {
+    await tz.openOsClock();
+    setTimezoneOpen(false);
+    nav.openGuide("03-os-privacy-setup");
+  };
+
+  // ---- Меню «Ещё» ----
+  const menuItems = useMemo<MenuEntry[]>(() => {
+    const items: MenuEntry[] = [
+      { id: "subscription", label: copy.menu.subscription, onSelect: nav.openSubscription },
+      { id: "settings", label: copy.menu.settings, onSelect: () => setSettingsOpen(true) },
+      { id: "sep-1", type: "separator" },
+      { id: "events", label: copy.menu.events, onSelect: () => setEventsOpen(true) },
+      {
+        id: "rescan",
+        label: copy.menu.rescan,
+        disabled: gw.refreshing,
+        onSelect: () => runFullAudit(true),
+      },
+      { id: "timezone", label: copy.menu.syncTimezone, onSelect: () => setTimezoneOpen(true) },
+      {
+        id: "updates",
+        label: updater.checkingUpdate
+          ? copy.menu.checkingUpdates
+          : updater.updateInfo?.update_available
+            ? copy.menu.updateTo(updater.updateInfo.latest_version)
+            : copy.menu.checkUpdates,
+        disabled: updater.checkingUpdate,
+        onSelect: () => {
+          if (updater.updateInfo?.update_available) updater.setShowUpdateModal(true);
+          else updater.handleCheckUpdates(false);
+        },
+      },
+      { id: "sep-2", type: "separator" },
+      {
+        id: "onboarding",
+        label: copy.menu.onboarding,
+        // Заглушка: настоящее знакомство появится в следующей волне.
+        onSelect: () => showToast(copy.toast.onboardingSoon, copy.toast.onboardingSoonText, "info"),
+      },
+      { id: "support", label: copy.menu.support, onSelect: handleOpenSupport },
+      { id: "about", label: copy.menu.about, onSelect: () => setAboutOpen(true) },
+    ];
+    if (!isTauri()) {
+      items.push(
+        { id: "sep-3", type: "separator" },
+        {
+          id: "sc-clean",
+          label: copy.menu.scenarioNl,
+          disabled: mock.scenario === "clean",
+          onSelect: () => mock.handleSwitchScenario("clean"),
+        },
+        {
+          id: "sc-turkey",
+          label: copy.menu.scenarioTr,
+          disabled: mock.scenario === "turkey",
+          onSelect: () => mock.handleSwitchScenario("turkey"),
+        },
+        {
+          id: "sc-ru",
+          label: copy.menu.scenarioRu,
+          disabled: mock.scenario === "ru",
+          onSelect: () => mock.handleSwitchScenario("ru"),
+        },
+      );
+    }
+    return items;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [gw.refreshing, updater.checkingUpdate, updater.updateInfo, mock.scenario, runFullAudit, nav.openSubscription]);
+
+  const payload = intercept.interceptPayload;
+
+  return (
+    <div className="zs-root zs-shell-page">
+      <div className="zs-app zs-shell">
+        <AppHeader ping={copy.pingLabel(gw.scanLatencyMs)} menuItems={menuItems} menuLabel={copy.menuLabel} />
+
+        {nav.subscriptionOpen ? (
+          <div className="zs-stack">
+            <div className="zs-shell__subhead">
+              <Button variant="quiet" size="sm" onClick={nav.closeSubscription}>
+                {copy.back}
+              </Button>
+              <h2 className="zs-t-heading">{copy.subscriptionTitle}</h2>
+            </div>
+            <SubscriptionTab
+              vpnCountry={gw.currentCountry}
+              activeReport={gw.activeReport}
+              state={gw.state}
+              onStateChange={() => runFullAudit(false)}
+              onNavigateToPaymentGuide={() => nav.openGuide("02-safe-payment-cards")}
+              onToast={showToast}
+            />
+          </div>
+        ) : (
+          <>
+            <Tabs
+              items={TAB_ITEMS}
+              value={nav.tab}
+              onChange={nav.goTab}
+              idPrefix={TAB_PREFIX}
+              aria-label={tabCopy.label}
+            />
+
+            {/* Перехват запроса в главном окне (Tauri): неблокирующий баннер */}
+            {isTauri() && payload && (
+              <Banner
+                tone="danger"
+                role="alert"
+                title={copy.intercept.title(payload.provider.toUpperCase())}
+                action={
+                  <>
+                    <Button size="sm" onClick={intercept.handleAllowInterception}>
+                      {copy.intercept.allow}
+                    </Button>{" "}
+                    <Button size="sm" variant="quiet" onClick={() => intercept.setInterceptPayload(null)}>
+                      {copy.intercept.dismiss}
+                    </Button>
+                  </>
+                }
+              >
+                {payload.network_change?.new_country === "RU"
+                  ? copy.intercept.ruText
+                  : copy.intercept.ipText(
+                      payload.report?.telemetry?.ip || "--",
+                      payload.report?.telemetry?.country_code || "--",
+                    )}
+              </Banner>
+            )}
+
+            <TabPanel idPrefix={TAB_PREFIX} id="overview" selected={nav.tab === "overview"} className="zs-stack">
+              <OverviewScreen
+                reports={gw.reports}
+                activeReport={gw.activeReport}
+                state={gw.state}
+                refreshing={gw.refreshing}
+                auditError={gw.auditError}
+                currentIp={gw.currentIp}
+                trustScore={gw.trustScore}
+                gatewayStats={stats.gatewayStats}
+                updateInfo={updater.updateInfo}
+                sysproxyActive={gw.sysproxyActive}
+                cliProtected={toggles.cliProtected}
+                killswitchFrozen={toggles.killswitchFrozen}
+                onToggleSysproxy={toggles.handleToggleSysproxy}
+                onToggleCli={toggles.handleToggleCliProtection}
+                onToggleKillswitch={toggles.handleToggleKillswitch}
+                onCopyIp={pinning.handleCopyIp}
+                onPinIp={pinning.handlePinIp}
+                onUnpinIp={pinning.handleUnpinIp}
+                onToggleStrict={pinning.handleToggleStrict}
+                onAllowProvider={pinning.handleAllowProvider}
+                onUnblockProvider={pinning.handleUnblockProvider}
+                onRetry={() => runFullAudit(true)}
+                onOpenChecks={() => nav.goTab("checks")}
+                onOpenTimezone={() => setTimezoneOpen(true)}
+                onOpenUpdate={() => updater.setShowUpdateModal(true)}
+                onOpenCrashTest={() => setCrashTestOpen(true)}
+              />
+            </TabPanel>
+
+            <TabPanel idPrefix={TAB_PREFIX} id="connect" selected={nav.tab === "connect"} className="zs-stack">
+              <ConnectScreen
+                state={gw.state}
+                currentIp={gw.currentIp}
+                currentCountry={gw.currentCountry}
+                onRefreshState={refreshState}
+                onAuditRefresh={() => runFullAudit(true)}
+                onOpenGuide={nav.openGuide}
+                onToast={showToast}
+              />
+            </TabPanel>
+
+            <TabPanel idPrefix={TAB_PREFIX} id="checks" selected={nav.tab === "checks"}>
+              <ChecksTab
+                report={gw.activeReport}
+                state={gw.state}
+                onNavigateToGuide={nav.openGuide}
+                onSimulate={intercept.handleSimulate}
+                onPinCurrentIp={pinning.handlePinIp}
+                onSyncTimezone={() => tz.handleSyncTz()}
+                onOpenCrashTest={() => setCrashTestOpen(true)}
+              />
+            </TabPanel>
+
+            <TabPanel idPrefix={TAB_PREFIX} id="backup" selected={nav.tab === "backup"}>
+              <BackupTab
+                backup={backup}
+                currentIp={gw.currentIp}
+                currentCountry={gw.currentCountry}
+                activeUpstreamKey={gw.state?.upstream_proxy?.raw_key}
+                onProfileSwitched={(_name, pin) => {
+                  if (pin) pinning.handlePinIp(pin);
+                  else runFullAudit(false);
+                }}
+                onToast={showToast}
+              />
+            </TabPanel>
+
+            <TabPanel idPrefix={TAB_PREFIX} id="guides" selected={nav.tab === "guides"}>
+              <GuidesTab
+                initialGuide={nav.guideTarget}
+                currentIp={gw.currentIp}
+                currentTimezone={gw.activeReport?.telemetry?.timezone}
+                onPinIp={pinning.handlePinIp}
+                onToast={showToast}
+              />
+            </TabPanel>
+          </>
+        )}
+
+        <footer className="zs-app__foot">
+          <span>{copy.footer}</span>
+          <Mono>v{version}</Mono>
+        </footer>
+
+        {/* Уведомления */}
+        <ToastViewport>
+          {toasts.map((t) => (
+            <Toast key={t.id} tone={t.tone} title={t.title} duration={3500} onClose={() => dismissToast(t.id)}>
+              {t.description}
+            </Toast>
+          ))}
+        </ToastViewport>
+      </div>
+
+      {/* Диалоги */}
+      <SettingsDialog
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        state={gw.state}
+        autoUpdateEnabled={gw.autoUpdateEnabled}
+        onToggleAutoUpdate={updater.handleToggleAutoUpdate}
+        onStateUpdated={() => refreshState().catch(() => {})}
+        onToast={showToast}
+      />
+      <CrashTestDialog open={crashTestOpen} onClose={() => setCrashTestOpen(false)} onToast={showToast} />
+      <TimezoneModal
+        open={timezoneOpen}
+        onClose={() => setTimezoneOpen(false)}
+        syncing={tz.syncingTz}
+        synced={tz.tzSyncedNotice}
+        onSync={() => tz.handleSyncTz()}
+        onOpenOsClock={handleOpenOsClock}
+      />
+      <UpdateModal
+        open={updater.showUpdateModal}
+        onClose={() => updater.setShowUpdateModal(false)}
+        info={updater.updateInfo}
+        installing={updater.installingUpdate}
+        progress={updater.updateProgress}
+        status={updater.updaterStatus}
+        onInstall={updater.handleInstallUpdate}
+      />
+      <AboutModal open={aboutOpen} onClose={() => setAboutOpen(false)} version={version} onSupport={handleOpenSupport} />
+      <EventsModal open={eventsOpen} onClose={() => setEventsOpen(false)} stats={stats.gatewayStats} />
+
+      {/* Превью диалога обрыва в браузере (без Tauri) */}
+      {!isTauri() && (browserSimulation || payload) && (
+        <AlertOverlay
+          initialPayload={payload ?? undefined}
+          onResolved={() => {
+            const hadPayload = Boolean(payload);
+            setBrowserSimulation(false);
+            if (hadPayload) {
+              intercept.setInterceptPayload(null);
+              runFullAudit(false);
+            }
+          }}
+        />
+      )}
+    </div>
+  );
+}

@@ -12,6 +12,8 @@ export interface DialogAction {
   /** Иконка слева (обычно только у главного действия). */
   icon?: IconName;
   onSelect: () => void;
+  /** Отключает кнопку и горячую клавишу (например, пока решение отправляется). */
+  disabled?: boolean;
 }
 
 export interface DialogProps {
@@ -37,6 +39,10 @@ export interface DialogProps {
   hotkeys?: boolean;
   /** Сразу сфокусировать главное действие. */
   autoFocus?: boolean;
+  /** Кнопка закрытия ✕ в шапке. Без обработчика кнопки нет. */
+  onClose?: () => void;
+  /** aria-label кнопки закрытия. */
+  closeLabel?: string;
   className?: string;
 }
 
@@ -54,6 +60,8 @@ export function Dialog({
   actions,
   hotkeys = true,
   autoFocus,
+  onClose,
+  closeLabel = "Закрыть",
   className,
 }: DialogProps) {
   const uid = useId();
@@ -96,6 +104,7 @@ export function Dialog({
       const index = ["1", "2", "3"].indexOf(e.key);
       if (index < 0) return;
       e.preventDefault();
+      if (actionsRef.current[index].disabled) return;
       actionsRef.current[index].onSelect();
     };
     window.addEventListener("keydown", onKey);
@@ -120,6 +129,7 @@ export function Dialog({
             {left} с
           </Badge>
         )}
+        {onClose && <Button variant="quiet" size="sm" iconOnly icon="x" aria-label={closeLabel} onClick={onClose} />}
       </div>
       <p className="zs-dialog__text" id={textId}>
         {text}
@@ -134,13 +144,21 @@ export function Dialog({
         </Badge>
       </div>
       <div className="zs-dialog__actions">
-        <Button variant="primary" size="lg" icon={first.icon} kbd="1" autoFocus={autoFocus} onClick={first.onSelect}>
+        <Button
+          variant="primary"
+          size="lg"
+          icon={first.icon}
+          kbd="1"
+          autoFocus={autoFocus}
+          disabled={first.disabled}
+          onClick={first.onSelect}
+        >
           {first.label}
         </Button>
-        <Button icon={second.icon} kbd="2" onClick={second.onSelect}>
+        <Button icon={second.icon} kbd="2" disabled={second.disabled} onClick={second.onSelect}>
           {second.label}
         </Button>
-        <Button variant="quiet" icon={third.icon} kbd="3" onClick={third.onSelect}>
+        <Button variant="quiet" icon={third.icon} kbd="3" disabled={third.disabled} onClick={third.onSelect}>
           {third.label}
         </Button>
       </div>

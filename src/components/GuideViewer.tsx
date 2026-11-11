@@ -32,7 +32,7 @@ interface GuideViewerProps {
   ) => void;
 }
 
-interface VpsProvider {
+export interface VpsProvider {
   id: string;
   name: string;
   tier: string;
@@ -85,7 +85,7 @@ const VIRTUAL_CARD_PROVIDERS: VirtualCardProvider[] = [
   },
 ];
 
-const VPS_PROVIDERS: VpsProvider[] = [
+export const VPS_PROVIDERS: VpsProvider[] = [
   {
     id: "hostvds",
     name: "HostVDS",
