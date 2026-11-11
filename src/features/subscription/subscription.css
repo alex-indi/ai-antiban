@@ -1,0 +1,24 @@
+/* Подписка: только токены. Вёрстка вокруг примитивов src/ui. */
+
+.subs-lead{margin:0 0 var(--space-3);color:var(--ink-2)}
+.subs-form{margin:0}
+.subs-form .zs-input{letter-spacing:.08em}
+
+/* Примеры BIN: подпись и кнопки sm в одну переносимую строку */
+.subs-examples{display:flex;flex-wrap:wrap;align-items:center;gap:var(--space-2);margin-top:var(--space-3)}
+.subs-examples__label{color:var(--ink-3)}
+
+/* Кнопка-ссылка в Banner: выравниваем текст по тексту баннера */
+.subs-banner-action{margin-left:calc(-1 * var(--space-3))}
+
+/* Штаты США и содержимое выбранного */
+.subs-states{margin-bottom:var(--space-2)}
+.subs-states .zs-tab{min-width:0}
+.subs-full{margin-top:var(--space-3)}
+
+/* Таймер прогрева */
+.subs-timer{display:flex;flex-direction:column;align-items:flex-start;gap:var(--space-3)}
+.subs-timer>.zs-stats,.subs-timer>.zs-progress{align-self:stretch}
+.subs-timer .zs-t-heading,.subs-timer .subs-lead{margin:0}
+.subs-ready{display:flex;flex-wrap:wrap;align-items:center;gap:var(--space-2);margin:0;color:var(--ink-2)}
+.subs-timer>div>.zs-btn--quiet{margin-left:calc(-1 * var(--space-3))}

@@ -5,6 +5,7 @@
   "windows": ["main", "alert-popup"],
   "permissions": [
     "core:default",
-    "opener:default"
+    "opener:default",
+    "updater:default"
   ]
 }

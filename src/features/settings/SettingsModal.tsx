@@ -1,0 +1,354 @@
+import { useEffect, useState } from "react";
+import type { FormEvent } from "react";
+import type { InterceptionBehavior, PopupPosition } from "../../types";
+import type { ShowToast } from "../../shared/hooks";
+import {
+  addCustomAiDomain,
+  forceCleanOsProxy,
+  getCustomAiDomains,
+  getInterceptionBehavior,
+  getPopupPosition,
+  removeCustomAiDomain,
+  setInterceptionBehavior,
+  setPopupPosition,
+} from "../../utils/api";
+import { openExternal } from "../../utils/opener";
+import { Badge, Banner, Button, ConfirmModal, Field, Link, Modal, Mono, Row, Rows, Section, Segmented, Switch } from "../../ui";
+import type { SegmentedOption } from "../../ui";
+import { settings as copy } from "../../shared/copy/ru";
+
+import "./settings.css";
+
+const SOURCE_URL = "https://github.com/kingbest1195/ai-antiban";
+
+export interface SettingsModalProps {
+  open: boolean;
+  onClose: () => void;
+  autoUpdateEnabled: boolean;
+  onToggleAutoUpdate: (enabled: boolean) => Promise<void>;
+  interceptionBehavior?: InterceptionBehavior;
+  popupPosition?: PopupPosition;
+  customAiDomains?: string[];
+  onStateUpdated?: () => void;
+  onToast?: ShowToast;
+}
+
+const BEHAVIOR_OPTIONS: SegmentedOption<InterceptionBehavior>[] = (
+  ["ask_popup", "auto_lock_silent", "auto_allow_trusted"] as const
+).map((value) => ({ value, label: copy.behavior.options[value] }));
+
+const POSITION_OPTIONS: SegmentedOption<PopupPosition>[] = (["top_right", "top_center"] as const).map((value) => ({
+  value,
+  label: copy.position.options[value],
+}));
+
+const errText = (err: unknown) => (err instanceof Error ? err.message : String(err));
+
+/** Настройки: поведение при обрыве VPN, домены ИИ, автообновление, приватность, сброс системного прокси. */
+export function SettingsModal({
+  open,
+  onClose,
+  autoUpdateEnabled,
+  onToggleAutoUpdate,
+  interceptionBehavior: propBehavior,
+  popupPosition: propPosition,
+  customAiDomains: propCustomDomains,
+  onStateUpdated,
+  onToast,
+}: SettingsModalProps) {
+  const [updatingToggle, setUpdatingToggle] = useState(false);
+  const [behavior, setBehavior] = useState<InterceptionBehavior>(propBehavior || "ask_popup");
+  const [position, setPosition] = useState<PopupPosition>(propPosition || "top_right");
+  const [customDomains, setCustomDomains] = useState<string[]>(propCustomDomains || []);
+  const [newDomainInput, setNewDomainInput] = useState("");
+  const [domainBusy, setDomainBusy] = useState(false);
+  const [confirmProxy, setConfirmProxy] = useState(false);
+  const [cleaningProxy, setCleaningProxy] = useState(false);
+  const [proxyResult, setProxyResult] = useState<{ ok: boolean; text: string } | null>(null);
+
+  // При открытии окна подтягиваем сохранённые значения из шлюза.
+  useEffect(() => {
+    if (!open) return;
+    if (propBehavior) setBehavior(propBehavior);
+    if (propPosition) setPosition(propPosition);
+    if (propCustomDomains) setCustomDomains(propCustomDomains);
+    getInterceptionBehavior()
+      .then(setBehavior)
+      .catch(() => {});
+    getPopupPosition()
+      .then(setPosition)
+      .catch(() => {});
+    getCustomAiDomains()
+      .then(setCustomDomains)
+      .catch(() => {});
+    setProxyResult(null);
+  }, [open, propBehavior, propPosition, propCustomDomains]);
+
+  const handleToggleAutoUpdate = async () => {
+    if (updatingToggle) return;
+    setUpdatingToggle(true);
+    try {
+      await onToggleAutoUpdate(!autoUpdateEnabled);
+    } finally {
+      setUpdatingToggle(false);
+    }
+  };
+
+  const handleBehaviorChange = async (next: InterceptionBehavior) => {
+    setBehavior(next);
+    try {
+      await setInterceptionBehavior(next);
+      onStateUpdated?.();
+      onToast?.(copy.behavior.toastTitle, copy.behavior.toastText[next], "success");
+    } catch (err) {
+      onToast?.(copy.behavior.saveError, errText(err), "warning");
+    }
+  };
+
+  const handlePositionChange = async (next: PopupPosition) => {
+    setPosition(next);
+    try {
+      await setPopupPosition(next);
+      onStateUpdated?.();
+      onToast?.(copy.position.toastTitle, copy.position.toastText[next], "info");
+    } catch (err) {
+      onToast?.(copy.behavior.saveError, errText(err), "warning");
+    }
+  };
+
+  const handleAddDomain = async (e: FormEvent) => {
+    e.preventDefault();
+    // Протокол, порт и путь убираем: пользователь мог вставить адрес целиком.
+    const domain = newDomainInput
+      .trim()
+      .toLowerCase()
+      .replace(/^https?:\/\//i, "")
+      .replace(/\/.*$/, "")
+      .replace(/:\d+$/, "")
+      .trim();
+    if (!domain) return;
+    setDomainBusy(true);
+    try {
+      const updated = await addCustomAiDomain(domain);
+      setCustomDomains(updated);
+      setNewDomainInput("");
+      onStateUpdated?.();
+      onToast?.(copy.domains.addedTitle, copy.domains.addedText(domain), "success");
+    } catch (err) {
+      onToast?.(copy.domains.addError, errText(err), "warning");
+    } finally {
+      setDomainBusy(false);
+    }
+  };
+
+  const handleRemoveDomain = async (domain: string) => {
+    setDomainBusy(true);
+    try {
+      const updated = await removeCustomAiDomain(domain);
+      setCustomDomains(updated);
+      onStateUpdated?.();
+      onToast?.(copy.domains.removedTitle, copy.domains.removedText(domain), "info");
+    } catch (err) {
+      onToast?.(copy.domains.removeError, errText(err), "warning");
+    } finally {
+      setDomainBusy(false);
+    }
+  };
+
+  const handleCleanOsProxy = async () => {
+    setCleaningProxy(true);
+    setProxyResult(null);
+    try {
+      const results = await forceCleanOsProxy();
+      setProxyResult({ ok: true, text: results.length > 0 ? results.join(" · ") : copy.proxy.doneDefault });
+      onToast?.(copy.proxy.toastTitle, copy.proxy.toastText, "success");
+    } catch (err) {
+      const message = errText(err);
+      setProxyResult({ ok: false, text: message });
+      onToast?.(copy.proxy.toastError, message, "warning");
+    } finally {
+      setCleaningProxy(false);
+      setConfirmProxy(false);
+    }
+  };
+
+  return (
+    <>
+      <Modal
+        open={open}
+        onClose={onClose}
+        title={copy.title}
+        footer={<Button onClick={onClose}>{copy.close}</Button>}
+      >
+        <div className="zs-settings">
+          {/* Если VPN отключился */}
+          <Section title={copy.behavior.section}>
+            <p className="zs-t-body zs-settings__lead">{copy.behavior.text}</p>
+            <Segmented
+              aria-label={copy.behavior.label}
+              options={BEHAVIOR_OPTIONS}
+              value={behavior}
+              onChange={handleBehaviorChange}
+            />
+            <p className="zs-settings__hint" aria-live="polite">
+              {copy.behavior.hints[behavior]}
+            </p>
+            {behavior === "ask_popup" && (
+              <>
+                <p className="zs-settings__label">{copy.position.label}</p>
+                <Segmented
+                  aria-label={copy.position.label}
+                  options={POSITION_OPTIONS}
+                  value={position}
+                  onChange={handlePositionChange}
+                />
+              </>
+            )}
+          </Section>
+
+          {/* Сервисы ИИ и свои домены */}
+          <Section title={copy.domains.section}>
+            <p className="zs-t-body zs-settings__lead">{copy.domains.text}</p>
+            <p className="zs-settings__sub">{copy.domains.builtinTitle}</p>
+            <ul className="zs-settings__list">
+              {copy.domains.builtin.map((name) => (
+                <li key={name}>{name}</li>
+              ))}
+            </ul>
+
+            <p className="zs-settings__sub">
+              {copy.domains.ownTitle} <Badge>{copy.domains.ownCount(customDomains.length)}</Badge>
+            </p>
+            <form className="zs-settings__form" onSubmit={handleAddDomain}>
+              <Field
+                label={copy.domains.fieldLabel}
+                placeholder={copy.domains.placeholder}
+                help={copy.domains.help}
+                value={newDomainInput}
+                onChange={(e) => setNewDomainInput(e.target.value)}
+                autoComplete="off"
+                autoCapitalize="off"
+                spellCheck={false}
+                action={
+                  <Button type="submit" disabled={domainBusy || !newDomainInput.trim()}>
+                    {domainBusy ? copy.domains.adding : copy.domains.add}
+                  </Button>
+                }
+              />
+            </form>
+            {customDomains.length > 0 ? (
+              <Rows className="zs-settings__rows">
+                {customDomains.map((domain) => (
+                  <Row
+                    key={domain}
+                    icon="globe"
+                    title={<Mono>{domain}</Mono>}
+                    trail={
+                      <Button
+                        variant="quiet"
+                        size="sm"
+                        iconOnly
+                        icon="x"
+                        aria-label={copy.domains.remove(domain)}
+                        disabled={domainBusy}
+                        onClick={() => handleRemoveDomain(domain)}
+                      />
+                    }
+                  />
+                ))}
+              </Rows>
+            ) : (
+              <p className="zs-settings__empty">{copy.domains.empty}</p>
+            )}
+          </Section>
+
+          {/* Обновления */}
+          <Section title={copy.updates.section}>
+            <Rows>
+              <Row
+                icon="refresh"
+                title={copy.updates.title}
+                sub={autoUpdateEnabled ? copy.updates.on : copy.updates.off}
+                trail={
+                  <Switch
+                    checked={autoUpdateEnabled}
+                    disabled={updatingToggle}
+                    onChange={handleToggleAutoUpdate}
+                    aria-label={copy.updates.label}
+                  />
+                }
+              />
+            </Rows>
+          </Section>
+
+          {/* Приватность */}
+          <Section title={copy.privacy.section}>
+            <Rows>
+              <Row icon="lock" title={copy.privacy.local} sub={copy.privacy.localText} />
+              <Row icon="shield" title={copy.privacy.selectiveTitle} sub={copy.privacy.selectiveText} />
+            </Rows>
+            <p className="zs-settings__sub">{copy.privacy.networkTitle}</p>
+            <Rows>
+              {copy.privacy.network.map((n) => (
+                <Row
+                  key={n.what}
+                  icon="globe"
+                  title={n.what}
+                  sub={
+                    <>
+                      <Mono>{n.where}</Mono>: {n.note}
+                    </>
+                  }
+                />
+              ))}
+            </Rows>
+            <p className="zs-settings__source">
+              <Link
+                href={SOURCE_URL}
+                chevron
+                onClick={(e) => {
+                  e.preventDefault();
+                  openExternal(SOURCE_URL);
+                }}
+              >
+                {copy.privacy.source}
+              </Link>
+            </p>
+          </Section>
+
+          {/* Сброс системного прокси */}
+          <Section title={copy.proxy.section}>
+            <p className="zs-t-body zs-settings__lead">{copy.proxy.text}</p>
+            <div className="zs-settings__danger">
+              <Button variant="danger" icon="power" disabled={cleaningProxy} onClick={() => setConfirmProxy(true)}>
+                {cleaningProxy ? copy.proxy.working : copy.proxy.action}
+              </Button>
+            </div>
+            {proxyResult && (
+              <Banner
+                className="zs-settings__result"
+                tone={proxyResult.ok ? "ok" : "danger"}
+                role={proxyResult.ok ? "status" : "alert"}
+                title={proxyResult.ok ? copy.proxy.done : copy.proxy.failed}
+              >
+                {proxyResult.text}
+              </Banner>
+            )}
+          </Section>
+        </div>
+      </Modal>
+
+      <ConfirmModal
+        open={open && confirmProxy}
+        title={copy.proxy.confirmTitle}
+        confirmLabel={copy.proxy.confirmAction}
+        busy={cleaningProxy}
+        busyLabel={copy.proxy.working}
+        onConfirm={handleCleanOsProxy}
+        onCancel={() => setConfirmProxy(false)}
+      >
+        {copy.proxy.confirmText}
+      </ConfirmModal>
+    </>
+  );
+}

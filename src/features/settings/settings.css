@@ -1,0 +1,15 @@
+/* Окно «Настройки»: только токены ДС. */
+.zs-settings{display:flex;flex-direction:column;gap:var(--space-6);padding:var(--space-2) 0 var(--space-4)}
+.zs-settings__lead{margin:0;color:var(--ink-2)}
+.zs-settings__hint{margin:var(--space-2) 0 0;font-size:13px;line-height:18px;color:var(--ink-2)}
+.zs-settings__label{margin:var(--space-3) 0 var(--space-2);font-size:12px;line-height:16px;color:var(--ink-3)}
+.zs-settings__list{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:var(--space-1);color:var(--ink-2);font-size:13px;line-height:18px}
+.zs-settings__list li{display:flex;gap:var(--space-2)}
+.zs-settings__list li::before{content:"";flex:none;width:6px;height:6px;margin-top:6px;border-radius:var(--radius-pill);background:var(--ink-3)}
+.zs-settings__sub{margin:var(--space-4) 0 var(--space-1);font-size:13px;line-height:18px;font-weight:600;color:var(--ink)}
+.zs-settings__form{margin:var(--space-3) 0 0}
+.zs-settings__rows{margin-top:var(--space-2)}
+.zs-settings__empty{margin:var(--space-2) 0 0;font-size:13px;line-height:18px;color:var(--ink-3)}
+.zs-settings__result{margin-top:var(--space-3)}
+.zs-settings__danger{margin-top:var(--space-3)}
+.zs-settings__source{margin:var(--space-3) 0 0}

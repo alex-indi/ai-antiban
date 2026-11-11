@@ -28,3 +28,6 @@ spec-*.md
 *.njsproj
 *.sln
 *.sw?
+
+# Design system package (source for src/ui, not shipped)
+design/

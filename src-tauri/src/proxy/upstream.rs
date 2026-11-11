@@ -1,442 +1,451 @@
-use std::net::{Ipv4Addr, Ipv6Addr};
-use std::time::Duration;
-use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
-use base64::Engine;
-use serde::Deserialize;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
-use url::Url;
+//! Egress through a route's entry nodes: SOCKS5, HTTP CONNECT and HTTP CONNECT over TLS (`https`).
 
+use std::io;
+use std::net::{Ipv4Addr, Ipv6Addr};
+use std::pin::Pin;
+use std::sync::{Arc, OnceLock};
+use std::task::{Context, Poll};
+use std::time::Duration;
+
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
+use tokio::net::TcpStream;
+use tokio_rustls::client::TlsStream;
+use tokio_rustls::rustls::pki_types::ServerName;
+use tokio_rustls::rustls::{ClientConfig, RootCertStore};
+use tokio_rustls::TlsConnector;
+
+use crate::routing::net::resolve_entry_checked;
+use crate::routing::{parse_route_key, Entry, EntryProto, Route};
 use crate::state::UpstreamProxyConfig;
 
-/// Decodes base64 with standard or URL-safe engines, tolerating absent padding.
-fn decode_base64_flexible(input: &str) -> Result<Vec<u8>, String> {
-    let clean = input.trim().trim_matches('"');
-    if clean.is_empty() {
-        return Err("Empty base64 payload".to_string());
-    }
-
-    if let Ok(bytes) = STANDARD.decode(clean) {
-        return Ok(bytes);
-    }
-    if let Ok(bytes) = STANDARD_NO_PAD.decode(clean) {
-        return Ok(bytes);
-    }
-    if let Ok(bytes) = URL_SAFE.decode(clean) {
-        return Ok(bytes);
-    }
-    if let Ok(bytes) = URL_SAFE_NO_PAD.decode(clean) {
-        return Ok(bytes);
-    }
-
-    let rem = clean.len() % 4;
-    if rem > 0 {
-        let padded = format!("{}{}", clean, "=".repeat(4 - rem));
-        if let Ok(bytes) = STANDARD.decode(&padded) {
-            return Ok(bytes);
-        }
-        if let Ok(bytes) = URL_SAFE.decode(&padded) {
-            return Ok(bytes);
-        }
-    }
-
-    Err("Could not decode base64 with standard or URL-safe encoding".to_string())
-}
-
-#[derive(Debug, Deserialize)]
-struct UpstreamJson {
-    protocol: String,
-    host: String,
-    port: u16,
-    #[serde(default)]
-    username: Option<String>,
-    #[serde(default)]
-    password: Option<String>,
-    #[serde(default)]
-    label: Option<String>,
-}
-
-fn parse_json_key(json_str: &str, raw_key: &str) -> Result<UpstreamProxyConfig, String> {
-    let json: UpstreamJson = serde_json::from_str(json_str)
-        .map_err(|e| format!("Invalid JSON proxy config: {e}"))?;
-
-    let proto = match json.protocol.to_ascii_lowercase().as_str() {
-        "socks5" | "socks5h" => "socks5".to_string(),
-        "http" => "http".to_string(),
-        other => return Err(format!("Unsupported protocol in JSON: {other}")),
-    };
-
-    let host = json.host.trim().to_string();
-    if host.is_empty() {
-        return Err("Proxy host cannot be empty".to_string());
-    }
-
-    if json.port == 0 {
-        return Err("Proxy port cannot be 0".to_string());
-    }
-
-    Ok(UpstreamProxyConfig {
-        enabled: true,
-        raw_key: raw_key.to_string(),
-        protocol: proto,
-        host,
-        port: json.port,
-        username: json.username.filter(|u| !u.is_empty()),
-        password: json.password.filter(|p| !p.is_empty()),
-        label: json.label.filter(|l| !l.is_empty()),
-    })
-}
-
-fn percent_decode_clean(input: &str) -> String {
-    url::form_urlencoded::parse(format!("v={}", input).as_bytes())
-        .next()
-        .map(|(_, v)| v.into_owned())
-        .unwrap_or_else(|| input.to_string())
-}
-
-fn parse_proxy_url(url_str: &str, raw_key: &str) -> Result<UpstreamProxyConfig, String> {
-    let trimmed = url_str.trim();
-
-    // Support unescaped spaces or Russian text in fragment (#Label)
-    let (url_part, raw_fragment) = match trimmed.split_once('#') {
-        Some((u, f)) => (u.trim(), Some(f.trim())),
-        None => (trimmed, None),
-    };
-
-    let parsed = Url::parse(url_part)
-        .map_err(|e| format!("Invalid proxy URL '{url_part}': {e}"))?;
-
-    let protocol = match parsed.scheme().to_ascii_lowercase().as_str() {
-        "socks5" | "socks5h" => "socks5".to_string(),
-        "http" => "http".to_string(),
-        other => return Err(format!("Unsupported proxy protocol '{other}'. Supported: socks5, http")),
-    };
-
-    let host = parsed
-        .host_str()
-        .ok_or_else(|| "Proxy URL missing host".to_string())?
-        .trim()
-        .to_string();
-
-    if host.is_empty() {
-        return Err("Proxy host cannot be empty".to_string());
-    }
-
-    let default_port = if protocol == "socks5" { 1080 } else { 80 };
-    let port = parsed.port().unwrap_or(default_port);
-
-    let username = if !parsed.username().is_empty() {
-        Some(percent_decode_clean(parsed.username()))
-    } else {
-        None
-    };
-
-    let password = parsed.password().map(percent_decode_clean);
-
-    let label = raw_fragment
-        .filter(|f| !f.is_empty())
-        .map(percent_decode_clean);
-
-    Ok(UpstreamProxyConfig {
-        enabled: true,
-        raw_key: raw_key.to_string(),
-        protocol,
-        host,
-        port,
-        username,
-        password,
-        label,
-    })
-}
-
-/// Parses a Zastava upstream proxy key or standard URL into an `UpstreamProxyConfig`.
-/// Supported formats:
-/// 1. `zastava://<base64>` (base64 JSON or standard socks5/http URL, with or without padding).
-/// 2. `socks5://[user:pass@]host:port[#Label]` or `socks5h://...`
-/// 3. `http://[user:pass@]host:port[#Label]`
+/// Parses a key or proxy URL into the legacy single-proxy view (first entry).
+/// See [`crate::routing::key`] for the accepted formats and validation rules.
 pub fn parse_upstream_key(input: &str) -> Result<UpstreamProxyConfig, String> {
-    let trimmed = input.trim();
-    if trimmed.is_empty() {
-        return Err("Upstream gateway key cannot be empty".to_string());
+    let route = parse_route_key(input, crate::auditor::network::current_timestamp())?;
+    route
+        .to_legacy(true)
+        .ok_or_else(|| "Key has no entry nodes".to_string())
+}
+
+/// Stream to the target through an entry node (or a direct TCP connection).
+pub enum UpstreamStream {
+    Plain(TcpStream),
+    Tls(Box<TlsStream<TcpStream>>),
+}
+
+impl AsyncRead for UpstreamStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            UpstreamStream::Plain(s) => Pin::new(s).poll_read(cx, buf),
+            UpstreamStream::Tls(s) => Pin::new(s.as_mut()).poll_read(cx, buf),
+        }
+    }
+}
+
+impl AsyncWrite for UpstreamStream {
+    fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+        match self.get_mut() {
+            UpstreamStream::Plain(s) => Pin::new(s).poll_write(cx, buf),
+            UpstreamStream::Tls(s) => Pin::new(s.as_mut()).poll_write(cx, buf),
+        }
     }
 
-    if let Some(rest) = trimmed.strip_prefix("zastava://") {
-        let decoded_bytes = decode_base64_flexible(rest)
-            .map_err(|e| format!("Invalid zastava:// base64 payload: {e}"))?;
-        let decoded_str = String::from_utf8(decoded_bytes)
-            .map_err(|e| format!("zastava:// payload is not valid UTF-8: {e}"))?;
-        let decoded_trimmed = decoded_str.trim();
-
-        if decoded_trimmed.starts_with('{') {
-            if let Ok(cfg) = parse_json_key(decoded_trimmed, trimmed) {
-                return Ok(cfg);
-            }
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            UpstreamStream::Plain(s) => Pin::new(s).poll_flush(cx),
+            UpstreamStream::Tls(s) => Pin::new(s.as_mut()).poll_flush(cx),
         }
+    }
 
-        parse_proxy_url(decoded_trimmed, trimmed)
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            UpstreamStream::Plain(s) => Pin::new(s).poll_shutdown(cx),
+            UpstreamStream::Tls(s) => Pin::new(s.as_mut()).poll_shutdown(cx),
+        }
+    }
+}
+
+fn build_tls_config(roots: RootCertStore) -> io::Result<ClientConfig> {
+    let provider = Arc::new(tokio_rustls::rustls::crypto::ring::default_provider());
+    let mut cfg = ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|e| io::Error::other(format!("TLS setup failed: {e}")))?
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    cfg.alpn_protocols = vec![b"http/1.1".to_vec()];
+    Ok(cfg)
+}
+
+/// Production TLS config: Mozilla roots (webpki-roots, same as reqwest), full verification.
+/// There is intentionally no way to inject roots or disable verification on this path.
+fn production_tls_config() -> io::Result<Arc<ClientConfig>> {
+    static CFG: OnceLock<Arc<ClientConfig>> = OnceLock::new();
+    if let Some(c) = CFG.get() {
+        return Ok(Arc::clone(c));
+    }
+    let mut roots = RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let cfg = Arc::new(build_tls_config(roots)?);
+    Ok(Arc::clone(CFG.get_or_init(|| cfg)))
+}
+
+fn authority(host: &str, port: u16) -> String {
+    if host.contains(':') {
+        format!("[{host}]:{port}")
     } else {
-        parse_proxy_url(trimmed, trimmed)
+        format!("{host}:{port}")
     }
 }
 
-async fn connect_socks5(
-    cfg: &UpstreamProxyConfig,
+/// Resolves the entry host once, checks EVERY address (see [`crate::routing::net`]) and connects to
+/// a checked `SocketAddr` — the name is never resolved a second time.
+async fn tcp_connect(entry: &Entry, allow_local: bool, gateway_port: u16) -> io::Result<TcpStream> {
+    let addrs = resolve_entry_checked(entry, allow_local, gateway_port).await?;
+    let mut last_err: Option<io::Error> = None;
+    for addr in addrs {
+        match TcpStream::connect(addr).await {
+            Ok(stream) => {
+                let _ = stream.set_nodelay(true);
+                return Ok(stream);
+            }
+            Err(e) => last_err = Some(e),
+        }
+    }
+    Err(last_err.unwrap_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no entry address")))
+}
+
+async fn socks5_handshake(
+    stream: &mut TcpStream,
+    entry: &Entry,
+    target_host: &str,
+    target_port: u16,
+) -> io::Result<()> {
+    // 1. Greeting (RFC 1928)
+    if entry.username.is_some() {
+        stream.write_all(&[0x05, 0x02, 0x00, 0x02]).await?;
+    } else {
+        stream.write_all(&[0x05, 0x01, 0x00]).await?;
+    }
+    stream.flush().await?;
+
+    // 2. Method choice
+    let mut method_buf = [0u8; 2];
+    stream.read_exact(&mut method_buf).await?;
+    if method_buf[0] != 0x05 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Invalid SOCKS version: 0x{:02x}", method_buf[0]),
+        ));
+    }
+    match method_buf[1] {
+        0x00 => {}
+        0x02 => {
+            // Username/password authentication (RFC 1929)
+            let u = entry.username.as_deref().unwrap_or("").as_bytes();
+            let p = entry.password.as_deref().unwrap_or("").as_bytes();
+            if u.len() > 255 || p.len() > 255 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "SOCKS5 username or password exceeds 255 bytes",
+                ));
+            }
+            let mut auth = Vec::with_capacity(3 + u.len() + p.len());
+            auth.push(0x01);
+            auth.push(u.len() as u8);
+            auth.extend_from_slice(u);
+            auth.push(p.len() as u8);
+            auth.extend_from_slice(p);
+            stream.write_all(&auth).await?;
+            stream.flush().await?;
+
+            let mut auth_resp = [0u8; 2];
+            stream.read_exact(&mut auth_resp).await?;
+            if auth_resp[0] != 0x01 || auth_resp[1] != 0x00 {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!("SOCKS5 authentication failed (status: 0x{:02x})", auth_resp[1]),
+                ));
+            }
+        }
+        0xFF => {
+            return Err(io::Error::new(
+                io::ErrorKind::ConnectionRefused,
+                "SOCKS5: No acceptable authentication methods offered by proxy server",
+            ));
+        }
+        other => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Unsupported SOCKS5 auth method selected by server: 0x{other:02x}"),
+            ));
+        }
+    }
+
+    // 3. CONNECT request (CMD=0x01)
+    let mut req = vec![0x05, 0x01, 0x00];
+    if let Ok(ipv4) = target_host.parse::<Ipv4Addr>() {
+        req.push(0x01);
+        req.extend_from_slice(&ipv4.octets());
+    } else if let Ok(ipv6) = target_host.parse::<Ipv6Addr>() {
+        req.push(0x04);
+        req.extend_from_slice(&ipv6.octets());
+    } else {
+        let d = target_host.as_bytes();
+        if d.len() > 255 {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "Target domain exceeds 255 bytes"));
+        }
+        req.push(0x03);
+        req.push(d.len() as u8);
+        req.extend_from_slice(d);
+    }
+    req.extend_from_slice(&target_port.to_be_bytes());
+    stream.write_all(&req).await?;
+    stream.flush().await?;
+
+    // 4. Reply: VER REP RSV ATYP BND.ADDR BND.PORT
+    let mut head = [0u8; 4];
+    stream.read_exact(&mut head).await?;
+    if head[0] != 0x05 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Invalid SOCKS response version: 0x{:02x}", head[0]),
+        ));
+    }
+    let rep = head[1];
+    if rep != 0x00 {
+        let msg = match rep {
+            0x01 => "General SOCKS server failure",
+            0x02 => "Connection not allowed by ruleset",
+            0x03 => "Network unreachable",
+            0x04 => "Host unreachable",
+            0x05 => "Connection refused",
+            0x06 => "TTL expired",
+            0x07 => "Command not supported",
+            0x08 => "Address type not supported",
+            _ => "Unknown SOCKS error",
+        };
+        return Err(io::Error::new(
+            io::ErrorKind::ConnectionRefused,
+            format!("SOCKS5 connect failed: {msg} (code: 0x{rep:02x})"),
+        ));
+    }
+    match head[3] {
+        0x01 => {
+            let mut rest = [0u8; 6];
+            stream.read_exact(&mut rest).await?;
+        }
+        0x03 => {
+            let mut len = [0u8; 1];
+            stream.read_exact(&mut len).await?;
+            let mut rest = vec![0u8; len[0] as usize + 2];
+            stream.read_exact(&mut rest).await?;
+        }
+        0x04 => {
+            let mut rest = [0u8; 18];
+            stream.read_exact(&mut rest).await?;
+        }
+        other => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Unsupported address type in SOCKS response: 0x{other:02x}"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// `CONNECT` handshake over any stream (plain TCP for `http`, TLS for `https`).
+async fn http_connect_handshake<S>(
+    stream: &mut S,
+    entry: &Entry,
+    target_host: &str,
+    target_port: u16,
+) -> io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let target = authority(target_host, target_port);
+    let mut req = format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n");
+    if let Some(ref u) = entry.username {
+        let p = entry.password.as_deref().unwrap_or("");
+        let encoded = STANDARD.encode(format!("{u}:{p}").as_bytes());
+        req.push_str(&format!("Proxy-Authorization: Basic {encoded}\r\n"));
+    }
+    req.push_str("Proxy-Connection: Keep-Alive\r\n\r\n");
+    stream.write_all(req.as_bytes()).await?;
+    stream.flush().await?;
+
+    // Read headers byte-by-byte up to \r\n\r\n so no tunneled payload is swallowed.
+    let mut header = Vec::with_capacity(512);
+    let mut b = [0u8; 1];
+    let mut matched = 0;
+    loop {
+        if header.len() >= 8192 {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "HTTP proxy response headers too large"));
+        }
+        let n = stream.read(&mut b).await?;
+        if n == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "HTTP proxy closed connection prematurely",
+            ));
+        }
+        header.push(b[0]);
+        matched = match (matched, b[0]) {
+            (0, b'\r') | (2, b'\r') => matched + 1,
+            (1, b'\n') => 2,
+            (3, b'\n') => break,
+            (_, b'\r') => 1,
+            _ => 0,
+        };
+    }
+
+    let resp = String::from_utf8_lossy(&header);
+    let status_line: String = resp.lines().next().unwrap_or("").chars().take(120).collect();
+    let code = status_line.split_whitespace().nth(1).unwrap_or("");
+    match code {
+        "200" => Ok(()),
+        "407" => Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "proxy authentication required (407): check the key credentials",
+        )),
+        "403" => Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("proxy refused the tunnel (403): {status_line}"),
+        )),
+        _ => Err(io::Error::new(
+            io::ErrorKind::ConnectionRefused,
+            format!("HTTP CONNECT proxy returned status {code}: {status_line}"),
+        )),
+    }
+}
+
+async fn connect_entry_with(
+    entry: &Entry,
     target_host: &str,
     target_port: u16,
     timeout: Duration,
-) -> Result<TcpStream, std::io::Error> {
-    tokio::time::timeout(timeout, async {
-        let mut stream = TcpStream::connect((cfg.host.as_str(), cfg.port)).await?;
-
-        // 1. Send SOCKS5 greeting (RFC 1928)
-        let has_auth = cfg.username.is_some();
-        if has_auth {
-            // Offer NO_AUTH (0x00) and USER_PASS (0x02)
-            stream.write_all(&[0x05, 0x02, 0x00, 0x02]).await?;
-        } else {
-            // Offer only NO_AUTH (0x00)
-            stream.write_all(&[0x05, 0x01, 0x00]).await?;
-        }
-        stream.flush().await?;
-
-        // 2. Read server method choice
-        let mut method_buf = [0u8; 2];
-        stream.read_exact(&mut method_buf).await?;
-        if method_buf[0] != 0x05 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("Invalid SOCKS version: 0x{:02x}", method_buf[0]),
-            ));
-        }
-
-        match method_buf[1] {
-            0x00 => {
-                // No authentication required
+    tls: &Arc<ClientConfig>,
+    allow_local: bool,
+    gateway_port: u16,
+) -> io::Result<UpstreamStream> {
+    let fut = async {
+        match entry.proto {
+            EntryProto::Socks5 => {
+                let mut s = tcp_connect(entry, allow_local, gateway_port).await?;
+                socks5_handshake(&mut s, entry, target_host, target_port).await?;
+                Ok(UpstreamStream::Plain(s))
             }
-            0x02 => {
-                // Username/password authentication (RFC 1929)
-                let username = cfg.username.as_deref().unwrap_or("");
-                let password = cfg.password.as_deref().unwrap_or("");
-                let u_bytes = username.as_bytes();
-                let p_bytes = password.as_bytes();
-                if u_bytes.len() > 255 || p_bytes.len() > 255 {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidInput,
-                        "SOCKS5 username or password exceeds 255 bytes",
-                    ));
-                }
-                let mut auth_packet = Vec::with_capacity(3 + u_bytes.len() + p_bytes.len());
-                auth_packet.push(0x01); // Auth subnegotiation version 1
-                auth_packet.push(u_bytes.len() as u8);
-                auth_packet.extend_from_slice(u_bytes);
-                auth_packet.push(p_bytes.len() as u8);
-                auth_packet.extend_from_slice(p_bytes);
-
-                stream.write_all(&auth_packet).await?;
-                stream.flush().await?;
-
-                let mut auth_resp = [0u8; 2];
-                stream.read_exact(&mut auth_resp).await?;
-                if auth_resp[0] != 0x01 || auth_resp[1] != 0x00 {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::PermissionDenied,
-                        format!("SOCKS5 authentication failed (status: 0x{:02x})", auth_resp[1]),
-                    ));
-                }
+            EntryProto::Http => {
+                let mut s = tcp_connect(entry, allow_local, gateway_port).await?;
+                http_connect_handshake(&mut s, entry, target_host, target_port).await?;
+                Ok(UpstreamStream::Plain(s))
             }
-            0xFF => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::ConnectionRefused,
-                    "SOCKS5: No acceptable authentication methods offered by proxy server",
-                ));
-            }
-            other => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("Unsupported SOCKS5 auth method selected by server: 0x{:02x}", other),
-                ));
+            EntryProto::Https => {
+                let server_name = ServerName::try_from(entry.tls_server_name().to_string())
+                    .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid TLS server name"))?;
+                let tcp = tcp_connect(entry, allow_local, gateway_port).await?;
+                let mut tls_stream = TlsConnector::from(Arc::clone(tls))
+                    .connect(server_name, tcp)
+                    .await
+                    .map_err(|e| io::Error::new(e.kind(), format!("TLS handshake failed: {e}")))?;
+                http_connect_handshake(&mut tls_stream, entry, target_host, target_port).await?;
+                Ok(UpstreamStream::Tls(Box::new(tls_stream)))
             }
         }
-
-        // 3. Send CONNECT request (RFC 1928: CMD=0x01, RSV=0x00)
-        let mut req = vec![0x05, 0x01, 0x00];
-        if let Ok(ipv4) = target_host.parse::<Ipv4Addr>() {
-            req.push(0x01); // ATYP IPv4
-            req.extend_from_slice(&ipv4.octets());
-        } else if let Ok(ipv6) = target_host.parse::<Ipv6Addr>() {
-            req.push(0x04); // ATYP IPv6
-            req.extend_from_slice(&ipv6.octets());
-        } else {
-            let domain_bytes = target_host.as_bytes();
-            if domain_bytes.len() > 255 {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "Target domain exceeds 255 bytes",
-                ));
-            }
-            req.push(0x03); // ATYP Domain name
-            req.push(domain_bytes.len() as u8);
-            req.extend_from_slice(domain_bytes);
-        }
-        req.extend_from_slice(&target_port.to_be_bytes());
-
-        stream.write_all(&req).await?;
-        stream.flush().await?;
-
-        // 4. Read server CONNECT response
-        // Format: VER (1), REP (1), RSV (1), ATYP (1), BND.ADDR (var), BND.PORT (2)
-        let mut resp_header = [0u8; 4];
-        stream.read_exact(&mut resp_header).await?;
-        if resp_header[0] != 0x05 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("Invalid SOCKS response version: 0x{:02x}", resp_header[0]),
-            ));
-        }
-
-        let rep = resp_header[1];
-        if rep != 0x00 {
-            let msg = match rep {
-                0x01 => "General SOCKS server failure",
-                0x02 => "Connection not allowed by ruleset",
-                0x03 => "Network unreachable",
-                0x04 => "Host unreachable",
-                0x05 => "Connection refused",
-                0x06 => "TTL expired",
-                0x07 => "Command not supported",
-                0x08 => "Address type not supported",
-                _ => "Unknown SOCKS error",
-            };
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::ConnectionRefused,
-                format!("SOCKS5 connect failed: {msg} (code: 0x{:02x})", rep),
-            ));
-        }
-
-        let atyp = resp_header[3];
-        match atyp {
-            0x01 => {
-                // IPv4: 4 bytes addr + 2 bytes port
-                let mut addr_port = [0u8; 6];
-                stream.read_exact(&mut addr_port).await?;
-            }
-            0x03 => {
-                // Domain: 1 byte len, len bytes domain, 2 bytes port
-                let mut len_buf = [0u8; 1];
-                stream.read_exact(&mut len_buf).await?;
-                let dlen = len_buf[0] as usize;
-                let mut rest = vec![0u8; dlen + 2];
-                stream.read_exact(&mut rest).await?;
-            }
-            0x04 => {
-                // IPv6: 16 bytes addr + 2 bytes port
-                let mut addr_port = [0u8; 18];
-                stream.read_exact(&mut addr_port).await?;
-            }
-            other => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("Unsupported address type in SOCKS response: 0x{:02x}", other),
-                ));
-            }
-        }
-
-        Ok(stream)
-    })
-    .await
-    .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "SOCKS5 upstream connection timed out"))?
+    };
+    tokio::time::timeout(timeout, fut).await.map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!("{} entry connection timed out", entry.proto.as_str()),
+        )
+    })?
 }
 
-async fn connect_http(
-    cfg: &UpstreamProxyConfig,
+async fn connect_via_route_with(
+    route: &Route,
     target_host: &str,
     target_port: u16,
-    timeout: Duration,
-) -> Result<TcpStream, std::io::Error> {
-    tokio::time::timeout(timeout, async {
-        let mut stream = TcpStream::connect((cfg.host.as_str(), cfg.port)).await?;
-
-        let mut req = format!(
-            "CONNECT {target_host}:{target_port} HTTP/1.1\r\nHost: {target_host}:{target_port}\r\n"
-        );
-
-        if let Some(ref u) = cfg.username {
-            let p = cfg.password.as_deref().unwrap_or("");
-            let creds = format!("{u}:{p}");
-            let encoded = STANDARD.encode(creds.as_bytes());
-            req.push_str(&format!("Proxy-Authorization: Basic {encoded}\r\n"));
-        }
-        req.push_str("Proxy-Connection: Keep-Alive\r\n\r\n");
-
-        stream.write_all(req.as_bytes()).await?;
-        stream.flush().await?;
-
-        // Read response headers byte-by-byte until \r\n\r\n to avoid buffering any target payload
-        let mut header_bytes = Vec::with_capacity(512);
-        let mut b = [0u8; 1];
-        let mut matched = 0;
-        let mut total_read = 0;
-
-        while total_read < 8192 {
-            let n = stream.read(&mut b).await?;
-            if n == 0 {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "HTTP proxy closed connection prematurely",
+    per_entry_timeout: Duration,
+    tls: &Arc<ClientConfig>,
+    gateway_port: u16,
+) -> io::Result<UpstreamStream> {
+    if route.entries.is_empty() {
+        return Err(io::Error::new(io::ErrorKind::NotFound, "route has no entry nodes"));
+    }
+    let mut errors = Vec::with_capacity(route.entries.len());
+    let mut last_kind = io::ErrorKind::Other;
+    let allow_local = route.allows_local_entries();
+    for (i, entry) in route.entries.iter().enumerate() {
+        match connect_entry_with(
+            entry,
+            target_host,
+            target_port,
+            per_entry_timeout,
+            tls,
+            allow_local,
+            gateway_port,
+        )
+        .await
+        {
+            Ok(s) => return Ok(s),
+            Err(e) => {
+                last_kind = e.kind();
+                errors.push(format!(
+                    "entry #{} {} {}: {e}",
+                    i + 1,
+                    entry.proto.as_str(),
+                    entry.endpoint()
                 ));
             }
-            total_read += 1;
-            header_bytes.push(b[0]);
-
-            match (matched, b[0]) {
-                (0, b'\r') => matched = 1,
-                (1, b'\n') => matched = 2,
-                (2, b'\r') => matched = 3,
-                (3, b'\n') => break,
-                (_, b'\r') => matched = 1,
-                _ => matched = 0,
-            }
         }
-
-        let resp_str = String::from_utf8_lossy(&header_bytes);
-        let status_line = resp_str.lines().next().unwrap_or("");
-        let mut parts = status_line.split_whitespace();
-        let _http_ver = parts.next();
-        let status_code = parts.next().unwrap_or("");
-
-        if status_code != "200" {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::ConnectionRefused,
-                format!("HTTP CONNECT proxy returned status {status_code}: {status_line}"),
-            ));
-        }
-
-        Ok(stream)
-    })
-    .await
-    .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "HTTP proxy upstream connection timed out"))?
+    }
+    Err(io::Error::new(
+        last_kind,
+        format!("all entry nodes failed ({})", errors.join("; ")),
+    ))
 }
 
-/// Connects to a target host:port via an upstream SOCKS5 or HTTP gateway proxy.
+/// Opens a tunnel to `target_host:target_port` through the route's entries, tried in order with
+/// `per_entry_timeout` each. Fails only when every entry failed. `gateway_port` is the port of the
+/// local gateway (0 = unknown): an entry pointing back at it is refused (loop).
+pub async fn connect_via_route(
+    route: &Route,
+    target_host: &str,
+    target_port: u16,
+    per_entry_timeout: Duration,
+    gateway_port: u16,
+) -> io::Result<UpstreamStream> {
+    let tls = production_tls_config()?;
+    connect_via_route_with(route, target_host, target_port, per_entry_timeout, &tls, gateway_port).await
+}
+
+/// Legacy entry point: connects through a single v1.3.x upstream config.
 pub async fn connect_via_upstream(
     cfg: &UpstreamProxyConfig,
     target_host: &str,
     target_port: u16,
     timeout: Duration,
-) -> Result<TcpStream, std::io::Error> {
-    match cfg.protocol.to_ascii_lowercase().as_str() {
-        "socks5" => connect_socks5(cfg, target_host, target_port, timeout).await,
-        "http" => connect_http(cfg, target_host, target_port, timeout).await,
-        other => Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("Unsupported upstream proxy protocol: {other}"),
-        )),
-    }
+) -> io::Result<UpstreamStream> {
+    let route = Route::from_legacy(cfg, 0).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("Unsupported upstream proxy protocol: {}", cfg.protocol),
+        )
+    })?;
+    connect_via_route(&route, target_host, target_port, timeout, 0).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use tokio::net::TcpListener;
 
     #[test]
@@ -454,10 +463,13 @@ mod tests {
 
     #[test]
     fn test_parse_socks5h_and_unescaped_label() {
-        let input = "socks5h://192.168.1.100:9050#Custom Gateway";
+        // Link-local / metadata / reserved entry hosts are rejected even for manual URL keys.
+        assert!(parse_upstream_key("socks5h://169.254.169.254:9050#Custom Gateway").is_err());
+
+        let input = "socks5h://95.217.1.100:9050#Custom Gateway";
         let cfg = parse_upstream_key(input).expect("parse failed");
         assert_eq!(cfg.protocol, "socks5");
-        assert_eq!(cfg.host, "192.168.1.100");
+        assert_eq!(cfg.host, "95.217.1.100");
         assert_eq!(cfg.port, 9050);
         assert_eq!(cfg.username, None);
         assert_eq!(cfg.password, None);
@@ -769,5 +781,247 @@ mod tests {
 
         let res = connect_via_upstream(&cfg, "api.openai.com", 443, Duration::from_secs(3)).await;
         assert!(res.is_err());
+    }
+
+    // --- HTTPS (TLS) entry tests: local stub with a throwaway CA ---
+
+    use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+    use tokio_rustls::rustls::ServerConfig;
+    use tokio_rustls::TlsAcceptor;
+
+    struct TestCa {
+        cert: rcgen::Certificate,
+        key: rcgen::KeyPair,
+    }
+
+    fn make_ca() -> TestCa {
+        let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, "Zastava Test CA");
+        let key = rcgen::KeyPair::generate().unwrap();
+        let cert = params.self_signed(&key).unwrap();
+        TestCa { cert, key }
+    }
+
+    fn leaf(ca: &TestCa) -> (CertificateDer<'static>, PrivateKeyDer<'static>) {
+        let params =
+            rcgen::CertificateParams::new(vec!["localhost".to_string(), "127.0.0.1".to_string()])
+                .unwrap();
+        let key = rcgen::KeyPair::generate().unwrap();
+        let cert = params.signed_by(&key, &ca.cert, &ca.key).unwrap();
+        (
+            cert.der().clone(),
+            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.serialize_der())),
+        )
+    }
+
+    /// Test-only client config trusting `ca` (the production path has no such hook).
+    fn client_cfg_trusting(ca: &TestCa) -> Arc<ClientConfig> {
+        let mut roots = RootCertStore::empty();
+        roots.add(ca.cert.der().clone()).unwrap();
+        Arc::new(build_tls_config(roots).unwrap())
+    }
+
+    #[derive(Clone, Copy)]
+    enum StubReply {
+        Ok,
+        AuthRequired,
+        Forbidden,
+    }
+
+    /// TLS CONNECT proxy stub: checks Basic auth, answers per `reply`, then echoes.
+    async fn spawn_tls_proxy(ca: &TestCa, expected_auth: &'static str, reply: StubReply) -> u16 {
+        let (cert, key) = leaf(ca);
+        let provider = Arc::new(tokio_rustls::rustls::crypto::ring::default_provider());
+        let mut cfg = ServerConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert], key)
+            .unwrap();
+        cfg.alpn_protocols = vec![b"http/1.1".to_vec()];
+        let acceptor = TlsAcceptor::from(Arc::new(cfg));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((tcp, _)) = listener.accept().await {
+                let acceptor = acceptor.clone();
+                tokio::spawn(async move {
+                    let Ok(mut tls) = acceptor.accept(tcp).await else {
+                        return;
+                    };
+                    let mut head = Vec::new();
+                    let mut b = [0u8; 1];
+                    while !head.ends_with(b"\r\n\r\n") {
+                        if tls.read(&mut b).await.unwrap_or(0) == 0 {
+                            return;
+                        }
+                        head.push(b[0]);
+                    }
+                    let req = String::from_utf8_lossy(&head).to_string();
+                    assert!(req.starts_with("CONNECT api.anthropic.com:443 HTTP/1.1"), "{req}");
+                    let authed = req.contains(&format!("Proxy-Authorization: Basic {expected_auth}\r\n"));
+                    let resp: &[u8] = match (reply, authed) {
+                        (StubReply::Forbidden, _) => b"HTTP/1.1 403 Forbidden\r\n\r\n",
+                        (StubReply::AuthRequired, _) | (StubReply::Ok, false) => {
+                            b"HTTP/1.1 407 Proxy Authentication Required\r\n\r\n"
+                        }
+                        (StubReply::Ok, true) => b"HTTP/1.1 200 Connection Established\r\n\r\n",
+                    };
+                    let _ = tls.write_all(resp).await;
+                    let mut buf = [0u8; 64];
+                    while let Ok(n) = tls.read(&mut buf).await {
+                        if n == 0 || tls.write_all(&buf[..n]).await.is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+        port
+    }
+
+    fn https_entry(port: u16, password: &str) -> Entry {
+        Entry {
+            proto: EntryProto::Https,
+            host: "127.0.0.1".to_string(),
+            port,
+            username: Some("alice".to_string()),
+            password: Some(password.to_string()),
+            sni: Some("localhost".to_string()),
+        }
+    }
+
+    fn route_of(entries: Vec<Entry>) -> Route {
+        Route {
+            id: "test".into(),
+            label: "test".into(),
+            country: None,
+            exit_ip: None,
+            expires_at: None,
+            entries,
+            raw_key: String::new(),
+            enabled: true,
+            added_at: 0,
+        }
+    }
+
+    // base64("alice:wonderland")
+    const ALICE_AUTH: &str = "YWxpY2U6d29uZGVybGFuZA==";
+
+    fn sandboxed(e: &io::Error) -> bool {
+        e.kind() == io::ErrorKind::PermissionDenied && !e.to_string().contains("40")
+    }
+
+    #[tokio::test]
+    async fn test_https_entry_connect_with_basic_auth() {
+        let ca = make_ca();
+        let port = spawn_tls_proxy(&ca, ALICE_AUTH, StubReply::Ok).await;
+        let route = route_of(vec![https_entry(port, "wonderland")]);
+        let res = connect_via_route_with(&route, "api.anthropic.com", 443, Duration::from_secs(3), &client_cfg_trusting(&ca), 0).await;
+        let mut s = match res {
+            Ok(s) => s,
+            Err(e) if sandboxed(&e) => return,
+            Err(e) => panic!("https connect failed: {e}"),
+        };
+        assert!(matches!(s, UpstreamStream::Tls(_)));
+        s.write_all(b"ping").await.unwrap();
+        let mut echo = [0u8; 4];
+        s.read_exact(&mut echo).await.unwrap();
+        assert_eq!(&echo, b"ping");
+    }
+
+    #[tokio::test]
+    async fn test_https_entry_407_and_403() {
+        let ca = make_ca();
+        let cfg = client_cfg_trusting(&ca);
+
+        let port = spawn_tls_proxy(&ca, ALICE_AUTH, StubReply::Ok).await;
+        let route = route_of(vec![https_entry(port, "WrongSecret77")]);
+        let err = connect_via_route_with(&route, "api.anthropic.com", 443, Duration::from_secs(3), &cfg, 0)
+            .await
+            .err()
+            .expect("wrong password must fail");
+        assert!(err.to_string().contains("407"), "{err}");
+        assert!(!err.to_string().contains("WrongSecret77"));
+
+        let port = spawn_tls_proxy(&ca, ALICE_AUTH, StubReply::AuthRequired).await;
+        let route = route_of(vec![https_entry(port, "wonderland")]);
+        let err = connect_via_route_with(&route, "api.anthropic.com", 443, Duration::from_secs(3), &cfg, 0)
+            .await
+            .err()
+            .expect("407 must fail");
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+
+        let port = spawn_tls_proxy(&ca, ALICE_AUTH, StubReply::Forbidden).await;
+        let route = route_of(vec![https_entry(port, "wonderland")]);
+        let err = connect_via_route_with(&route, "api.anthropic.com", 443, Duration::from_secs(3), &cfg, 0)
+            .await
+            .err()
+            .expect("403 must fail");
+        assert!(err.to_string().contains("403"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_https_entry_rejects_untrusted_certificate() {
+        let ca = make_ca();
+        let other_ca = make_ca();
+        let port = spawn_tls_proxy(&ca, ALICE_AUTH, StubReply::Ok).await;
+        let route = route_of(vec![https_entry(port, "wonderland")]);
+
+        // Client trusts a different CA.
+        let err = connect_via_route_with(&route, "api.anthropic.com", 443, Duration::from_secs(3), &client_cfg_trusting(&other_ca), 0)
+            .await
+            .err()
+            .expect("untrusted cert must fail");
+        assert!(err.to_string().contains("TLS handshake failed"), "{err}");
+
+        // Production path (public roots only) rejects the private CA as well.
+        let err = connect_via_route(&route, "api.anthropic.com", 443, Duration::from_secs(3), 0)
+            .await
+            .err()
+            .expect("production roots must reject a private CA");
+        assert!(err.to_string().contains("TLS handshake failed"), "{err}");
+
+        // SNI that the certificate does not cover is rejected too.
+        let mut bad_sni = https_entry(port, "wonderland");
+        bad_sni.sni = Some("evil.example.com".to_string());
+        let err = connect_via_route_with(&route_of(vec![bad_sni]), "api.anthropic.com", 443, Duration::from_secs(3), &client_cfg_trusting(&ca), 0)
+            .await
+            .err()
+            .expect("name mismatch must fail");
+        assert!(err.to_string().contains("TLS handshake failed"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_route_failover_to_second_entry() {
+        let ca = make_ca();
+        let good = spawn_tls_proxy(&ca, ALICE_AUTH, StubReply::Ok).await;
+        let closed = {
+            let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            l.local_addr().unwrap().port()
+        };
+        let route = route_of(vec![https_entry(closed, "wonderland"), https_entry(good, "wonderland")]);
+        let mut s = match connect_via_route_with(&route, "api.anthropic.com", 443, Duration::from_secs(3), &client_cfg_trusting(&ca), 0).await {
+            Ok(s) => s,
+            Err(e) if sandboxed(&e) => return,
+            Err(e) => panic!("failover failed: {e}"),
+        };
+        s.write_all(b"pong").await.unwrap();
+        let mut echo = [0u8; 4];
+        s.read_exact(&mut echo).await.unwrap();
+        assert_eq!(&echo, b"pong");
+
+        // All entries down -> one aggregated error, no secrets.
+        let route = route_of(vec![https_entry(closed, "wonderland"), https_entry(closed, "wonderland")]);
+        let err = connect_via_route_with(&route, "api.anthropic.com", 443, Duration::from_secs(1), &client_cfg_trusting(&ca), 0)
+            .await
+            .err()
+            .expect("all down must fail");
+        let msg = err.to_string();
+        assert!(msg.contains("entry #1") && msg.contains("entry #2"), "{msg}");
+        assert!(!msg.contains("wonderland"));
     }
 }

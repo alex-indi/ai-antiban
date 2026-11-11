@@ -1,9 +1,14 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 
 use crate::auditor::geo_matrix::CheckResult;
+use crate::routing::net::resolve_entry_checked;
+use crate::routing::{route_fingerprint, route_id_for_raw_key, Entry, EntryProto, Route};
 use crate::state::UpstreamProxyConfig;
 
 pub const CACHE_TTL_SECONDS: u64 = 15;
@@ -52,24 +57,126 @@ pub fn current_timestamp() -> u64 {
         .unwrap_or(0)
 }
 
-/// Builds a `reqwest::Client` configured to route all traffic through an upstream gateway proxy.
+/// Builds a `reqwest::Client` that routes all traffic through a legacy single upstream proxy.
+/// The upstream host must be an IP literal here (no name resolution takes place).
 pub fn build_upstream_client(cfg: &UpstreamProxyConfig) -> Result<reqwest::Client, String> {
-    let proxy_url = format!("{}://{}:{}", cfg.protocol, cfg.host, cfg.port);
-    let mut proxy = reqwest::Proxy::all(&proxy_url)
-        .map_err(|e| format!("Failed to configure upstream proxy URL '{proxy_url}': {e}"))?;
+    let route = Route::from_legacy(cfg, 0)
+        .ok_or_else(|| format!("Unsupported upstream proxy protocol: {}", cfg.protocol))?;
+    let entry = route.entries.first().ok_or("route has no entries")?;
+    let ip: IpAddr = entry
+        .host
+        .parse()
+        .map_err(|_| "The legacy upstream client needs an IP address".to_string())?;
+    let builder = entry_client_builder(entry, SocketAddr::new(ip, entry.port))?;
+    builder
+        .build()
+        .map_err(|e| format!("Failed to build proxy reqwest client: {e}"))
+}
 
-    if let Some(ref u) = cfg.username {
-        let p = cfg.password.as_deref().unwrap_or("");
-        proxy = proxy.basic_auth(u, p);
+fn url_host(host: &str) -> String {
+    if host.contains(':') {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    }
+}
+
+/// reqwest builder going through `entry`, mirroring the gateway transport. `addr` is the entry
+/// address that was already resolved and checked: the client connects to it and never resolves the
+/// entry name on its own.
+/// * `socks5` -> `socks5h://` (target names resolved by the node, like the gateway's ATYP=domain);
+/// * `http`   -> `http://` proxy with `Proxy-Authorization: Basic`;
+/// * `https`  -> `https://` proxy: reqwest 0.12 (`rustls-tls`, webpki roots) opens TLS to the proxy
+///   with full certificate verification and ALPN http/1.1, then sends `CONNECT` with Basic auth.
+///   The proxy URL host is the TLS server name and a DNS override pins it to `addr`.
+///
+/// Credentials never go into error messages.
+fn entry_client_builder(entry: &Entry, addr: SocketAddr) -> Result<reqwest::ClientBuilder, String> {
+    let scheme = match entry.proto {
+        EntryProto::Socks5 => "socks5h",
+        EntryProto::Http => "http",
+        EntryProto::Https => "https",
+    };
+    let url_name = match entry.proto {
+        EntryProto::Https => url_host(entry.tls_server_name()),
+        _ => url_host(&addr.ip().to_string()),
+    };
+    let mut proxy_url = url::Url::parse(&format!("{scheme}://{url_name}:{}", entry.port))
+        .map_err(|_| "Invalid entry address for the audit client".to_string())?;
+
+    if entry.proto == EntryProto::Socks5 {
+        // reqwest takes SOCKS credentials from the URL userinfo only.
+        if let Some(u) = entry.username.as_deref() {
+            proxy_url
+                .set_username(u)
+                .map_err(|_| "Invalid entry username".to_string())?;
+            proxy_url
+                .set_password(entry.password.as_deref())
+                .map_err(|_| "Invalid entry password".to_string())?;
+        }
     }
 
-    reqwest::Client::builder()
+    let mut proxy = reqwest::Proxy::all(proxy_url.as_str())
+        .map_err(|_| format!("Failed to configure {scheme} entry proxy for the audit client"))?;
+    if entry.proto != EntryProto::Socks5 {
+        if let Some(u) = entry.username.as_deref() {
+            proxy = proxy.basic_auth(u, entry.password.as_deref().unwrap_or(""));
+        }
+    }
+
+    let mut builder = reqwest::Client::builder()
         .timeout(Duration::from_millis(REQUEST_TIMEOUT_MS))
         .pool_max_idle_per_host(0)
         .user_agent("Zastava/1.0")
-        .proxy(proxy)
+        .proxy(proxy);
+    if entry.proto == EntryProto::Https {
+        let name = entry.tls_server_name();
+        if name.parse::<IpAddr>().is_err() {
+            builder = builder.resolve(name, addr);
+        }
+    }
+    Ok(builder)
+}
+
+/// Audit client going through the given route entry (same entry the gateway uses). The entry host
+/// is resolved here, every address is checked against the entry policy (see
+/// [`crate::routing::net`]) and the client is pinned to the checked address.
+pub async fn build_entry_client(
+    entry: &Entry,
+    allow_local: bool,
+    gateway_port: u16,
+) -> Result<reqwest::Client, String> {
+    let addr = checked_entry_addr(entry, allow_local, gateway_port).await?;
+    entry_client_builder(entry, addr)?
         .build()
-        .map_err(|e| format!("Failed to build proxy reqwest client: {e}"))
+        .map_err(|e| format!("Failed to build audit client: {e}"))
+}
+
+async fn checked_entry_addr(
+    entry: &Entry,
+    allow_local: bool,
+    gateway_port: u16,
+) -> Result<SocketAddr, String> {
+    let addrs = resolve_entry_checked(entry, allow_local, gateway_port)
+        .await
+        .map_err(|e| format!("Entry node {} rejected: {e}", entry.endpoint()))?;
+    addrs
+        .first()
+        .copied()
+        .ok_or_else(|| format!("Entry {} did not resolve", entry.endpoint()))
+}
+
+/// Test-only: same as [`build_entry_client`] but trusting an extra root (local TLS stub).
+#[cfg(test)]
+async fn build_entry_client_with_root(
+    entry: &Entry,
+    root: reqwest::Certificate,
+) -> Result<reqwest::Client, String> {
+    let addr = checked_entry_addr(entry, true, 0).await?;
+    entry_client_builder(entry, addr)?
+        .add_root_certificate(root)
+        .build()
+        .map_err(|e| format!("Failed to build audit client: {e}"))
 }
 
 // Models for ipwho.is
@@ -115,11 +222,24 @@ struct FreeIpApiResponse {
     time_zones: Option<Vec<String>>,
 }
 
+/// Cache key: `None` = direct egress, `Some(route id)` = egress through that route.
+type CacheKey = Option<String>;
+
+/// Cached telemetry plus the fingerprint of the route nodes it was measured through (`None` for
+/// direct egress and for test-injected values).
+#[derive(Clone)]
+struct CachedTelemetry {
+    telemetry: NetworkTelemetry,
+    route_fp: Option<u64>,
+}
+
 #[derive(Clone)]
 pub struct NetworkResolver {
     client: reqwest::Client,
-    cache: Arc<RwLock<Option<(Option<String>, NetworkTelemetry)>>>,
+    cache: Arc<RwLock<HashMap<CacheKey, CachedTelemetry>>>,
     resolve_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Port of the local gateway (0 = unknown), used to refuse entry nodes that point back at it.
+    gateway_port: Arc<AtomicU16>,
 }
 
 impl Default for NetworkResolver {
@@ -141,108 +261,147 @@ impl NetworkResolver {
 
         Self {
             client,
-            cache: Arc::new(RwLock::new(None)),
+            cache: Arc::new(RwLock::new(HashMap::new())),
             resolve_lock: Arc::new(tokio::sync::Mutex::new(())),
+            gateway_port: Arc::new(AtomicU16::new(0)),
         }
     }
 
-    /// Invalidate existing cached telemetry
+    /// Registers the port of the local gateway (called by the proxy server when it binds).
+    pub fn set_gateway_port(&self, port: u16) {
+        self.gateway_port.store(port, Ordering::SeqCst);
+    }
+
+    pub fn gateway_port(&self) -> u16 {
+        self.gateway_port.load(Ordering::SeqCst)
+    }
+
+    /// Invalidate all cached telemetry (direct and every route).
     pub async fn invalidate_cache(&self) {
-        let mut w = self.cache.write().await;
-        *w = None;
+        self.cache.write().await.clear();
     }
 
-    /// Pre-populate or override cached telemetry (useful for deterministic tests and simulation)
+    /// Invalidate cached telemetry of one route.
+    pub async fn invalidate_route(&self, route_id: &str) {
+        self.cache.write().await.remove(&Some(route_id.to_string()));
+    }
+
+    /// Pre-populate or override cached direct telemetry (deterministic tests and simulation)
     pub async fn set_cached(&self, telemetry: NetworkTelemetry) {
-        let mut w = self.cache.write().await;
-        *w = Some((None, telemetry));
+        self.cache.write().await.insert(None, CachedTelemetry { telemetry, route_fp: None });
     }
 
-    /// Pre-populate cached telemetry for a specific upstream proxy key
+    /// Pre-populate cached telemetry for a route id (`None` = direct).
+    pub async fn set_cached_for_route(&self, route_id: Option<String>, telemetry: NetworkTelemetry) {
+        self.cache.write().await.insert(route_id, CachedTelemetry { telemetry, route_fp: None });
+    }
+
+    /// Legacy: pre-populate cached telemetry for an upstream raw key (mapped to its route id).
     pub async fn set_cached_for_key(&self, key: Option<String>, telemetry: NetworkTelemetry) {
-        let mut w = self.cache.write().await;
-        *w = Some((key, telemetry));
+        let route_id = key.map(|k| route_id_for_raw_key(&k));
+        self.set_cached_for_route(route_id, telemetry).await;
     }
 
     /// Resolve network telemetry using fresh cache or cascading endpoints (direct egress)
     pub async fn resolve(&self, force_refresh: bool) -> Result<NetworkTelemetry, String> {
-        self.resolve_with_upstream(force_refresh, None).await
+        self.resolve_with_route(force_refresh, None).await
     }
 
-    /// Resolve network telemetry, routing through upstream proxy gateway if configured and enabled
+    /// Legacy: resolve through a single upstream config (when enabled).
     pub async fn resolve_with_upstream(
         &self,
         force_refresh: bool,
         upstream: Option<&UpstreamProxyConfig>,
     ) -> Result<NetworkTelemetry, String> {
-        let current_key = upstream.filter(|c| c.enabled).map(|c| c.raw_key.clone());
+        let route = upstream
+            .filter(|c| c.enabled)
+            .and_then(|c| Route::from_legacy(c, 0));
+        self.resolve_with_route(force_refresh, route.as_ref()).await
+    }
+
+    async fn cached(
+        &self,
+        key: &CacheKey,
+        force_refresh: bool,
+        locked: bool,
+        route_fp: Option<u64>,
+    ) -> Option<NetworkTelemetry> {
+        let r = self.cache.read().await;
+        let entry = r.get(key)?;
+        // The route was re-imported with different nodes / credentials: the entry is stale.
+        if let (Some(cached_fp), Some(fp)) = (entry.route_fp, route_fp) {
+            if cached_fp != fp {
+                return None;
+            }
+        }
+        let telemetry = &entry.telemetry;
+        let ttl = if force_refresh || !telemetry.has_provider_metadata() {
+            2
+        } else {
+            CACHE_TTL_SECONDS
+        };
+        let usable = telemetry.is_fresh(ttl)
+            && if force_refresh {
+                // Inside the lock a concurrent forced refresh may just have filled the cache.
+                locked && telemetry.has_provider_metadata()
+            } else {
+                true
+            };
+        usable.then(|| telemetry.clone())
+    }
+
+    /// Resolve egress telemetry directly (`None`) or through a route's entries (tried in order).
+    pub async fn resolve_with_route(
+        &self,
+        force_refresh: bool,
+        route: Option<&Route>,
+    ) -> Result<NetworkTelemetry, String> {
+        let key: CacheKey = route.map(|r| r.id.clone());
+        let fp = route.map(route_fingerprint);
 
         if !force_refresh {
-            let r = self.cache.read().await;
-            if let Some((cached_key, telemetry)) = &*r {
-                let key_matches = match (&current_key, cached_key) {
-                    (Some(k1), Some(k2)) => k1 == k2,
-                    (None, None) => true,
-                    _ => false,
-                };
-                let effective_ttl = if telemetry.has_provider_metadata() {
-                    CACHE_TTL_SECONDS
-                } else {
-                    2
-                };
-                if key_matches && telemetry.is_fresh(effective_ttl) {
-                    return Ok(telemetry.clone());
-                }
+            if let Some(t) = self.cached(&key, false, false, fp).await {
+                return Ok(t);
             }
         }
 
         // Coalesce concurrent cold-start / multi-provider probes so we don't fire 4 simultaneous
         // requests to ipwho.is / ipinfo.io and trigger rate limits or timeouts on startup.
         let _guard = self.resolve_lock.lock().await;
-
-        {
-            let r = self.cache.read().await;
-            if let Some((cached_key, telemetry)) = &*r {
-                let key_matches = match (&current_key, cached_key) {
-                    (Some(k1), Some(k2)) => k1 == k2,
-                    (None, None) => true,
-                    _ => false,
-                };
-                let effective_ttl = if force_refresh {
-                    2
-                } else if telemetry.has_provider_metadata() {
-                    CACHE_TTL_SECONDS
-                } else {
-                    2
-                };
-                if key_matches
-                    && telemetry.is_fresh(effective_ttl)
-                    && (!force_refresh || telemetry.has_provider_metadata())
-                {
-                    return Ok(telemetry.clone());
-                }
-            }
+        if let Some(t) = self.cached(&key, force_refresh, true, fp).await {
+            return Ok(t);
         }
 
-        let client = if let Some(cfg) = upstream {
-            if cfg.enabled {
-                build_upstream_client(cfg)?
-            } else {
-                self.client.clone()
-            }
-        } else {
-            self.client.clone()
+        let telemetry = match route {
+            None => self.cascade_query(&self.client).await?,
+            Some(r) => self.cascade_via_route(r).await?,
         };
 
-        let telemetry = self.cascade_query(&client).await?;
-
-        // Cache the newly acquired telemetry along with the active upstream key
-        {
-            let mut w = self.cache.write().await;
-            *w = Some((current_key, telemetry.clone()));
-        }
-
+        self.cache
+            .write()
+            .await
+            .insert(key, CachedTelemetry { telemetry: telemetry.clone(), route_fp: fp });
         Ok(telemetry)
+    }
+
+    async fn cascade_via_route(&self, route: &Route) -> Result<NetworkTelemetry, String> {
+        if route.entries.is_empty() {
+            return Err("route has no entry nodes".to_string());
+        }
+        let mut errors = Vec::new();
+        let allow_local = route.allows_local_entries();
+        let gateway_port = self.gateway_port();
+        for (i, entry) in route.entries.iter().enumerate() {
+            let res = match build_entry_client(entry, allow_local, gateway_port).await {
+                Ok(client) => self.cascade_query(&client).await,
+                Err(e) => Err(e),
+            };
+            match res {
+                Ok(t) => return Ok(t),
+                Err(e) => errors.push(format!("entry #{} {}: {e}", i + 1, entry.endpoint())),
+            }
+        }
+        Err(format!("Route egress lookup failed: {}", errors.join("; ")))
     }
 
     async fn cascade_query(&self, client: &reqwest::Client) -> Result<NetworkTelemetry, String> {
@@ -683,5 +842,127 @@ mod tests {
             ..bare
         };
         assert!(rich.has_provider_metadata());
+    }
+
+    /// reqwest 0.12 + rustls can use an `https://` proxy: TLS to the entry (verified against the
+    /// trusted root, SNI from the key), `CONNECT` with Basic auth, then TLS to the target inside.
+    #[tokio::test]
+    async fn test_entry_client_through_https_proxy_stub() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio_rustls::rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
+
+        let mut ca_params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+        ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let ca_key = rcgen::KeyPair::generate().unwrap();
+        let ca = ca_params.self_signed(&ca_key).unwrap();
+        let leaf_params = rcgen::CertificateParams::new(vec![
+            "localhost".to_string(),
+            "audit.test".to_string(),
+        ])
+        .unwrap();
+        let leaf_key = rcgen::KeyPair::generate().unwrap();
+        let leaf = leaf_params.signed_by(&leaf_key, &ca, &ca_key).unwrap();
+
+        let provider = Arc::new(tokio_rustls::rustls::crypto::ring::default_provider());
+        let server_cfg = tokio_rustls::rustls::ServerConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![leaf.der().clone()],
+                PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(leaf_key.serialize_der())),
+            )
+            .unwrap();
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_cfg));
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (seen_tx, seen_rx) = tokio::sync::oneshot::channel::<String>();
+        tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut outer = acceptor.accept(tcp).await.unwrap();
+            let mut head = Vec::new();
+            let mut b = [0u8; 1];
+            while !head.ends_with(b"\r\n\r\n") {
+                if outer.read(&mut b).await.unwrap() == 0 {
+                    return;
+                }
+                head.push(b[0]);
+            }
+            let _ = seen_tx.send(String::from_utf8_lossy(&head).to_string());
+            outer
+                .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                .await
+                .unwrap();
+            // Inner TLS: we are now the target audit.test.
+            let mut inner = acceptor.accept(outer).await.unwrap();
+            let mut req = [0u8; 1024];
+            let _ = inner.read(&mut req).await.unwrap();
+            inner
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .await
+                .unwrap();
+            let _ = inner.shutdown().await;
+        });
+
+        let entry = Entry {
+            proto: EntryProto::Https,
+            host: "127.0.0.1".to_string(),
+            port,
+            username: Some("alice".to_string()),
+            password: Some("wonderland".to_string()),
+            sni: Some("localhost".to_string()),
+        };
+        let root = reqwest::Certificate::from_der(ca.der()).unwrap();
+        let client = build_entry_client_with_root(&entry, root).await.unwrap();
+        let body = match client.get("https://audit.test/").send().await {
+            Ok(r) => r.text().await.unwrap(),
+            Err(e) if format!("{e:?}").contains("PermissionDenied") => return,
+            Err(e) => panic!("request through https proxy failed: {e:?}"),
+        };
+        assert_eq!(body, "ok");
+        let seen = seen_rx.await.unwrap();
+        assert!(seen.starts_with("CONNECT audit.test:443 HTTP/1.1"), "{seen}");
+        // base64("alice:wonderland")
+        assert!(seen.contains("YWxpY2U6d29uZGVybGFuZA=="), "{seen}");
+
+        // Without the test root (production path) the private CA is rejected.
+        let prod = build_entry_client(&entry, true, 0).await.unwrap();
+        assert!(prod.get("https://audit.test/").send().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_resolver_cache_keyed_by_route_id() {
+        let resolver = NetworkResolver::new();
+        let tel = |ip: &str| NetworkTelemetry {
+            ip: ip.to_string(),
+            country_code: "NL".to_string(),
+            hostname: None,
+            asn: Some(1),
+            org: None,
+            isp: None,
+            timezone: None,
+            resolved_at: current_timestamp(),
+        };
+        resolver.set_cached(tel("109.1.1.1")).await;
+        resolver.set_cached_for_route(Some("route-a".into()), tel("185.1.1.1")).await;
+        resolver.set_cached_for_route(Some("route-b".into()), tel("185.2.2.2")).await;
+        let mk = |id: &str| Route {
+            id: id.to_string(),
+            label: id.to_string(),
+            country: None,
+            exit_ip: None,
+            expires_at: None,
+            entries: vec![],
+            raw_key: String::new(),
+            enabled: true,
+            added_at: 0,
+        };
+        assert_eq!(resolver.resolve(false).await.unwrap().ip, "109.1.1.1");
+        assert_eq!(resolver.resolve_with_route(false, Some(&mk("route-a"))).await.unwrap().ip, "185.1.1.1");
+        assert_eq!(resolver.resolve_with_route(false, Some(&mk("route-b"))).await.unwrap().ip, "185.2.2.2");
+        resolver.invalidate_route("route-a").await;
+        // No entries -> cannot resolve, and never falls back to the direct cache.
+        assert!(resolver.resolve_with_route(false, Some(&mk("route-a"))).await.is_err());
     }
 }

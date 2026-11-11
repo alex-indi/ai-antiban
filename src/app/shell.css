@@ -1,0 +1,12 @@
+/* Оболочка главного окна. Только токены ДС. */
+.zs-shell-page{display:flex;justify-content:center;min-height:100vh;background:var(--bg-0)}
+.zs-app.zs-shell{width:100%;max-width:460px;min-height:100vh;margin:0 auto}
+.zs-shell .zs-app__foot{margin-top:auto}
+.zs-stack{display:flex;flex-direction:column;gap:var(--space-4)}
+.zs-shell__subhead{display:flex;align-items:center;gap:var(--space-2)}
+.zs-shell__subhead .zs-t-heading{margin:0}
+.zs-changelog{margin:var(--space-3) 0 0;padding:0;list-style:none;display:flex;flex-direction:column;gap:var(--space-2)}
+.zs-changelog li{display:flex;gap:var(--space-2);color:var(--ink-2)}
+.zs-changelog li::before{content:"";flex:none;width:6px;height:6px;margin-top:7px;border-radius:var(--radius-pill);background:var(--brand-text)}
+.zs-changelog__title{margin:var(--space-3) 0 0;color:var(--ink);font-weight:600}
+.zs-changelog__raw{margin:var(--space-3) 0 0;white-space:pre-wrap;color:var(--ink-2);font-size:13px;line-height:18px}

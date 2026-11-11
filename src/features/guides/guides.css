@@ -1,0 +1,32 @@
+/* Гайды: только токены. Вспомогательная вёрстка текста и карточек; всё остальное — примитивы src/ui. */
+
+/* Подписи и абзацы внутри карточек и шагов */
+.guides-lead{margin:0 0 var(--space-3);color:var(--ink-2)}
+.guides-lead:last-child{margin-bottom:0}
+.guides-lead strong{color:var(--ink);font-weight:600}
+.guides-label{margin:var(--space-3) 0 0;font-size:13px;line-height:18px;font-weight:600;color:var(--ink)}
+.guides-note{margin:var(--space-2) 0 0;font-size:13px;line-height:18px;color:var(--ink-2)}
+.guides-note--tight{margin:calc(-1 * var(--space-1)) 0 var(--space-3)}
+.guides-way{display:flex;flex-direction:column;align-items:flex-start;gap:var(--space-2);margin-top:var(--space-4)}
+.guides-way>.guides-label{margin-top:0}
+.guides-way>.guides-lead,.guides-way>.guides-note{margin:0}
+.guides-way>.guides-code{align-self:stretch}
+.guides-list{margin:0;padding-left:var(--space-5);list-style:decimal;color:var(--ink-2)}
+.guides-list li+li{margin-top:var(--space-2)}
+
+/* Письмо хостинга: заголовок с бейджем и строки данных */
+.guides-mail{margin-top:var(--space-2);padding:var(--space-3);border-radius:var(--radius-md);background:var(--bg-2)}
+.guides-mail__head{display:flex;align-items:center;justify-content:space-between;gap:var(--space-3);margin-bottom:var(--space-1)}
+.guides-mail .guides-label{margin:0}
+.guides-mail .zs-row__trail{color:var(--ink)}
+
+/* Карточки хостингов и сервисов карт: строка с переходом, описание, бейджи, промокод */
+.guides-offers{margin:0;padding:0;list-style:none}
+.guides-offer{display:flex;flex-direction:column;gap:var(--space-2);padding:var(--space-3) 0;border-top:1px solid var(--line)}
+.guides-offer:first-child{border-top:0;padding-top:var(--space-1)}
+.guides-offer:last-child{padding-bottom:var(--space-1)}
+.guides-offer .zs-row:first-child{padding:0}
+.guides-offer__text{margin:0;font-size:13px;line-height:18px;color:var(--ink-2)}
+.guides-offer__facts{margin:0;font-size:13px;line-height:18px;color:var(--ink-2)}
+.guides-offer__facts strong{color:var(--ink);font-weight:600}
+.guides-offer__chips,.guides-offer__meta{display:flex;flex-wrap:wrap;align-items:center;gap:var(--space-2)}

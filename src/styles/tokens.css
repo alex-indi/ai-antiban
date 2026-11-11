@@ -1,0 +1,53 @@
+/* Застава — токены. Источник: tokens.json. Не правьте значения в компонентах — только здесь. */
+:root {
+  --bg-0: #0a0c10; /* Фон окна и поля ввода. Самый тёмный слой. */
+  --bg-1: #11141b; /* Карточки и диалоги на bg-0. */
+  --bg-2: #181c25; /* Вложенные плитки и иконки-подложки внутри карточек bg-1. */
+  --bg-3: #252b3a; /* Вторичные кнопки, выбранная вкладка, нейтральный бейдж, трек выключенного тумблера. */
+  --line: #232936; /* Тонкие разделители между строками списка. Декоративная, смысла не несёт. */
+  --line-strong: #6b7588; /* Границы полей ввода и выключенного тумблера: 3:1 и выше на bg-0, bg-1, bg-2. */
+  --ink: #eef1f6; /* Основной текст и заголовки на bg-0…bg-3. */
+  --ink-2: #b4bcc9; /* Вторичный текст и подписи на bg-0…bg-3. */
+  --ink-3: #8f99ab; /* Третичный текст (метки, плейсхолдеры) на bg-0, bg-1, bg-2. Не мельче 12px. */
+  --brand: #10b981; /* Изумрудный Заставы: заливка главной кнопки, включённый тумблер, кольцо доверия. Текст на нём только on-brand. */
+  --brand-text: #34d399; /* Зелёный текст и иконки статуса «защищено» на bg-0…bg-3 и brand-soft. */
+  --brand-soft: #0f2f25; /* Подложка баннера и бейджа «в порядке». */
+  --on-brand: #04140e; /* Текст и иконки на заливке brand. */
+  --danger: #f43f5e; /* Заливка для необратимого или блокирующего действия. Текст на ней только on-danger. */
+  --danger-text: #fb7185; /* Текст и иконки ошибки/утечки на bg-0…bg-3 и danger-soft. Всегда со словом или иконкой, не только цветом. */
+  --danger-soft: #30131b; /* Подложка баннера и бейджа ошибки, тихая опасная кнопка. */
+  --on-danger: #1f0409; /* Текст на заливке danger. */
+  --warn: #f59e0b; /* Заливка предупреждения (редко). Текст на ней только on-warn. */
+  --warn-text: #fbbf24; /* Текст и иконки предупреждения на bg-0…bg-3 и warn-soft. */
+  --warn-soft: #2c200a; /* Подложка баннера и бейджа предупреждения. */
+  --on-warn: #1c1203; /* Текст на заливке warn. */
+  --info-text: #7dd3fc; /* Ссылки, справочные иконки и текст на bg-0…bg-3 и info-soft. */
+  --info-soft: #0e2738; /* Подложка справочного баннера и бейджа. */
+  --focus: #7dd3fc; /* Кольцо фокуса: сплошное 2px с отступом 2px, 3:1 и выше на всех фонах. */
+
+  --shadow-pop: 0 16px 40px rgba(0,0,0,0.55);
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-pill: 999px;
+
+  --font-sans: "Golos Text", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+.zs-t-title { font-family: var(--font-sans); font-size: 20px; line-height: 26px; font-weight: 600; letter-spacing: -0.01em; }
+.zs-t-heading { font-family: var(--font-sans); font-size: 15px; line-height: 22px; font-weight: 600; }
+.zs-t-body { font-family: var(--font-sans); font-size: 14px; line-height: 20px; font-weight: 400; }
+.zs-t-caption { font-family: var(--font-sans); font-size: 12px; line-height: 16px; font-weight: 400; }
+.zs-t-overline { font-family: var(--font-sans); font-size: 12px; line-height: 16px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; }
+.zs-t-metric { font-family: var(--font-mono); font-size: 22px; line-height: 28px; font-weight: 600; }
+.zs-t-data { font-family: var(--font-mono); font-size: 13px; line-height: 18px; font-weight: 500; }
