@@ -1,6 +1,6 @@
 //! Claude-specific commands: app cache cleaning, local data scan/export, multi-account profiles.
 
-use crate::{auditor, proxy, state};
+use crate::{auditor, routing, state};
 
 #[tauri::command]
 pub async fn clean_app_cache(
@@ -50,19 +50,25 @@ pub async fn switch_claude_profile_cmd(
     if let Some(ref ip) = res.active_profile.bound_ip {
         let _ = state.set_pinned_ip(Some(ip.clone())).await;
     }
-    if let Some(ref key) = res.bound_upstream_key_updated {
-        if let Ok(parsed) = proxy::upstream::parse_upstream_key(key) {
-            let _ = state.set_upstream_proxy(Some(parsed)).await;
-        }
-    }
+    // The profile's key becomes the highest-priority route for Claude (anthropic) only.
+    let _ = routing::apply_profile_key(&state, res.bound_upstream_key_updated.as_deref()).await;
     Ok(res)
 }
 
 #[tauri::command]
 pub async fn delete_claude_profile_cmd(
     profile_id: String,
+    state: tauri::State<'_, state::AppState>,
 ) -> Result<auditor::profile_switcher::ClaudeProfileListResponse, String> {
-    auditor::profile_switcher::delete_claude_profile(&profile_id)
+    let resp = auditor::profile_switcher::delete_claude_profile(&profile_id)?;
+    // Deleting the active profile activates another one: follow its key.
+    let active_key = resp
+        .profiles
+        .iter()
+        .find(|p| p.id == resp.active_profile_id)
+        .and_then(|p| p.bound_upstream_key.clone());
+    let _ = routing::apply_profile_key(&state, active_key.as_deref()).await;
+    Ok(resp)
 }
 
 #[tauri::command]
@@ -78,6 +84,16 @@ pub async fn bind_ip_to_claude_profile_cmd(
 pub async fn bind_upstream_to_claude_profile_cmd(
     profile_id: String,
     upstream_key: Option<String>,
+    state: tauri::State<'_, state::AppState>,
 ) -> Result<auditor::profile_switcher::ClaudeProfileListResponse, String> {
-    auditor::profile_switcher::update_profile_bound_upstream(&profile_id, upstream_key)
+    let upstream_key = upstream_key.filter(|k| !k.trim().is_empty());
+    // Validate before persisting so a profile never carries an unusable key.
+    if let Some(ref k) = upstream_key {
+        routing::parse_route_key(k, crate::auditor::network::current_timestamp())?;
+    }
+    let resp = auditor::profile_switcher::update_profile_bound_upstream(&profile_id, upstream_key.clone())?;
+    if resp.active_profile_id == profile_id {
+        routing::apply_profile_key(&state, upstream_key.as_deref()).await?;
+    }
+    Ok(resp)
 }

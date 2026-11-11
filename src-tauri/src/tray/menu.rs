@@ -14,7 +14,7 @@ pub fn build_tray(app: &tauri::App) -> tauri::Result<()> {
     let status_i = IconMenuItem::with_id(
         app,
         "status_header",
-        "Застава v1.3.0 — Шлюз активен",
+        concat!("Застава v", env!("CARGO_PKG_VERSION"), " — Шлюз активен"),
         false,
         Image::from_bytes(TRAY_ICON_GREEN).ok(),
         None::<&str>,

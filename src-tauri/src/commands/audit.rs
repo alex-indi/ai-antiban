@@ -5,7 +5,8 @@ use crate::{auditor, proxy, state};
 
 #[tauri::command]
 pub async fn get_state(state: tauri::State<'_, state::AppState>) -> Result<state::AppStateData, String> {
-    Ok(state.get_data().await)
+    // Route secrets are blanked; `upstream_proxy` keeps its v1.3.x shape (legacy/default route).
+    Ok(state.get_data().await.redacted_for_ui())
 }
 
 #[tauri::command]
@@ -80,9 +81,7 @@ pub async fn allow_provider_session(
 
     // Record current IP in history so Impossible Travel is acknowledged and cleared
     if let Some(provider_id) = auditor::ProviderId::from_id(&provider) {
-        let upstream_opt = state.get_upstream_proxy().await;
-        let active_upstream = upstream_opt.as_ref().filter(|c| c.enabled);
-        if let Ok(tel) = auditor.resolver.resolve_with_upstream(false, active_upstream).await {
+        if let Ok(tel) = auditor.resolve_for_provider(provider_id, &state, false).await {
             let entry = state::IpHistoryEntry::new(
                 tel.ip,
                 tel.country_code,
@@ -117,9 +116,7 @@ pub async fn unblock_provider_cmd(
 
     // Also update IP history to current IP so a stale Impossible Travel doesn't immediately re-flag
     if let Some(provider_id) = auditor::ProviderId::from_id(&provider) {
-        let upstream_opt = state.get_upstream_proxy().await;
-        let active_upstream = upstream_opt.as_ref().filter(|c| c.enabled);
-        if let Ok(tel) = auditor.resolver.resolve_with_upstream(false, active_upstream).await {
+        if let Ok(tel) = auditor.resolve_for_provider(provider_id, &state, false).await {
             let entry = state::IpHistoryEntry::new(
                 tel.ip,
                 tel.country_code,

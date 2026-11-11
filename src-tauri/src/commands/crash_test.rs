@@ -38,9 +38,10 @@ pub async fn run_vpn_crash_test_step(
     };
 
     let (current_ip, current_country) = {
-        let upstream_opt = state.get_upstream_proxy().await;
-        let active_upstream = upstream_opt.as_ref().filter(|c| c.enabled);
-        if let Ok(tel) = auditor.resolver.resolve_with_upstream(false, active_upstream).await {
+        if let Ok(tel) = auditor
+            .resolve_for_provider(auditor::ProviderId::Anthropic, &state, false)
+            .await
+        {
             (tel.ip, tel.country_code)
         } else {
             let st = state.get_data().await;

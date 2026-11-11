@@ -4,6 +4,7 @@ pub mod bin_checker;
 pub mod commands;
 pub mod popup;
 pub mod proxy;
+pub mod routing;
 pub mod sanctions;
 pub mod state;
 pub mod sysproxy;

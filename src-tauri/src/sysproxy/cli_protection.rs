@@ -47,11 +47,9 @@ pub fn enable_cli_and_ide_protection_with_tz(
             ("ALL_PROXY", proxy_url.as_str()),
             ("NO_PROXY", NO_PROXY_VALUE),
         ];
-        if let Some(timezone) = tz {
-            let trimmed = timezone.trim();
-            if !trimmed.is_empty() {
-                vars.push(("TZ", trimmed));
-            }
+        let sanitized_tz = tz.and_then(super::shell_rc::sanitize_timezone);
+        if let Some(ref timezone) = sanitized_tz {
+            vars.push(("TZ", timezone.as_str()));
         }
         let mut launchd_ok = false;
         for (k, v) in vars {
@@ -143,13 +141,10 @@ pub fn enable_cli_and_ide_protection_with_tz(
     let mut shell_command = format!(
         "export HTTP_PROXY=\"{proxy_url}\" HTTPS_PROXY=\"{proxy_url}\" ALL_PROXY=\"{proxy_url}\" NO_PROXY=\"{NO_PROXY_VALUE}\""
     );
-    if let Some(timezone) = tz {
-        let trimmed = timezone.trim();
-        if !trimmed.is_empty() {
-            shell_command.push_str(&format!(
-                " TZ=\"{trimmed}\" LANG=\"en_US.UTF-8\" LC_ALL=\"en_US.UTF-8\""
-            ));
-        }
+    if let Some(trimmed) = tz.and_then(super::shell_rc::sanitize_timezone) {
+        shell_command.push_str(&format!(
+            " TZ=\"{trimmed}\" LANG=\"en_US.UTF-8\" LC_ALL=\"en_US.UTF-8\""
+        ));
     }
 
     CliProtectionReport {

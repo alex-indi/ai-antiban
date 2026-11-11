@@ -1,6 +1,11 @@
 //! Network guard: detects sudden egress-IP changes (VPN switch, reconnect, roaming),
 //! freezes ALL AI traffic (new and already established tunnels) and asks the user
 //! to confirm the new network before anything is forwarded again.
+//!
+//! Providers whose traffic goes through a route (see `crate::routing`) have a fixed exit IP, so
+//! local network / VPN changes do not apply to them: the automatic `Pending` / `Blocked` gate
+//! states, popups and provider blocks only concern unrouted providers. The manual kill-switch
+//! ("СТОП СЕТИ") is an explicit, separate flag that stops everything, routed traffic included.
 
 use std::net::IpAddr;
 use std::sync::{Arc, OnceLock};
@@ -68,11 +73,15 @@ struct Inner {
     pending: Option<Pending>,
     last_probe: Option<Instant>,
     last_route_fp: Option<String>,
+    /// Unrouted providers seen on the previous tick (a provider becoming unrouted re-arms checks).
+    last_unrouted: Option<Vec<&'static str>>,
 }
 
 pub struct NetworkGuard {
     gate_tx: watch::Sender<Gate>,
     tunnel_abort_tx: watch::Sender<u64>,
+    /// Manual kill-switch. Unlike the automatic gate it also stops routed providers.
+    kill_tx: watch::Sender<bool>,
     inner: Mutex<Inner>,
     ctx: OnceLock<GuardCtx>,
     client: reqwest::Client,
@@ -108,6 +117,7 @@ fn severity(report: &RiskReport) -> u8 {
     }
 }
 
+/// Audits anthropic, openai and gemini (each on its own egress). Order is fixed: anthropic first.
 async fn audit_all(ctx: &GuardCtx) -> Result<Vec<RiskReport>, String> {
     // First call forces a fresh geo lookup (with 1 automatic retry for transient VPN interface handshakes),
     // and the others reuse the freshly filled cache.
@@ -168,6 +178,7 @@ impl NetworkGuard {
     pub fn new() -> Self {
         let (gate_tx, _rx) = watch::channel(Gate::Open);
         let (tunnel_abort_tx, _abort_rx) = watch::channel(0u64);
+        let (kill_tx, _kill_rx) = watch::channel(false);
         let client = reqwest::Client::builder()
             .timeout(Duration::from_millis(2000))
             // Never reuse keep-alive sockets: they may still point to the previous route.
@@ -178,6 +189,7 @@ impl NetworkGuard {
         Self {
             gate_tx,
             tunnel_abort_tx,
+            kill_tx,
             inner: Mutex::new(Inner::default()),
             ctx: OnceLock::new(),
             client,
@@ -196,6 +208,16 @@ impl NetworkGuard {
         self.tunnel_abort_tx.subscribe()
     }
 
+    /// True while the manual kill-switch is engaged (automatic freezes do not set it).
+    pub fn is_manual_killswitch(&self) -> bool {
+        *self.kill_tx.borrow()
+    }
+
+    pub fn subscribe_killswitch(&self) -> watch::Receiver<bool> {
+        self.kill_tx.subscribe()
+    }
+
+    /// Aborts unrouted tunnels (routed tunnels only obey the manual kill-switch).
     pub fn abort_active_tunnels(&self) {
         let _ = self.tunnel_abort_tx.send_modify(|val| *val = val.wrapping_add(1));
     }
@@ -233,6 +255,7 @@ impl NetworkGuard {
 
     pub async fn set_manual_killswitch(&self, freeze: bool, state: &AppState) -> bool {
         if freeze {
+            self.kill_tx.send_replace(true);
             self.abort_active_tunnels();
             self.set_gate(Gate::Blocked);
             let mut inner = self.inner.lock().await;
@@ -251,6 +274,7 @@ impl NetworkGuard {
             }
             true
         } else {
+            self.kill_tx.send_replace(false);
             self.set_gate(Gate::Open);
             let mut inner = self.inner.lock().await;
             if let Some(p) = inner.pending.take() {
@@ -357,12 +381,38 @@ impl NetworkGuard {
     }
 
     pub async fn check_route_and_tick(self: &Arc<Self>, ctx: &GuardCtx) {
-        let upstream_opt = ctx.state.get_upstream_proxy().await;
-        let active_upstream = upstream_opt.as_ref().filter(|c| c.enabled);
-        let upstream_key = active_upstream.map(|c| c.raw_key.as_str());
-        let current_fp = compute_local_route_fingerprint(upstream_key);
+        // Routes do not take part in the fingerprint: routed traffic has a fixed exit and is not
+        // governed by the gate, and the probe below measures the direct egress only.
+        let current_fp = compute_local_route_fingerprint(None);
+        let unrouted = ctx.state.unrouted_providers().await;
 
         let mut inner = self.inner.lock().await;
+
+        // A provider that just lost its route must be re-checked against the current network.
+        let gained_unrouted = inner
+            .last_unrouted
+            .as_ref()
+            .map(|prev| unrouted.iter().any(|p| !prev.contains(p)))
+            .unwrap_or(false);
+        if gained_unrouted {
+            inner.handled_ip = None;
+        }
+        inner.last_unrouted = Some(unrouted.clone());
+
+        // Manual kill-switch: nothing to decide until the user lifts it.
+        if self.is_manual_killswitch() {
+            inner.last_route_fp = Some(current_fp);
+            return;
+        }
+
+        // Every provider has a fixed exit: local network changes are irrelevant.
+        if unrouted.is_empty() {
+            inner.last_route_fp = Some(current_fp);
+            if self.gate() != Gate::Open {
+                self.set_gate(Gate::Open);
+            }
+            return;
+        }
 
         let route_changed = if inner.baseline.is_some() {
             if let Some(ref old_fp) = inner.last_route_fp {
@@ -446,7 +496,7 @@ impl NetworkGuard {
             let country = ctx
                 .auditor
                 .resolver
-                .resolve_with_upstream(false, active_upstream)
+                .resolve(false)
                 .await
                 .ok()
                 .map(|t| t.country_code);
@@ -497,7 +547,15 @@ impl NetworkGuard {
         inner: &mut Inner,
         new_ip: String,
     ) {
-        // 1. Freeze everything immediately.
+        let unrouted = ctx.state.unrouted_providers().await;
+        if unrouted.is_empty() {
+            // All providers are routed: nothing flows over the changed network, no popup.
+            inner.handled_ip = Some(new_ip);
+            self.set_gate(Gate::Open);
+            return;
+        }
+
+        // 1. Freeze everything immediately (unrouted traffic only; routed tunnels ignore the gate).
         self.set_gate(Gate::Pending);
         self.abort_active_tunnels();
         if let Some(p) = inner.pending.take() {
@@ -526,8 +584,13 @@ impl NetworkGuard {
         }
         inner.handled_ip = Some(new_ip.clone());
 
-        let mut worst = &reports[0];
-        for r in &reports[1..] {
+        // Only the providers that actually use the changed network decide.
+        let relevant: Vec<&RiskReport> = reports
+            .iter()
+            .filter(|r| unrouted.contains(&r.provider.as_str()))
+            .collect();
+        let mut worst = relevant.first().copied().unwrap_or(&reports[0]);
+        for r in relevant.iter().skip(1) {
             if severity(r) > severity(worst) {
                 worst = r;
             }
@@ -541,7 +604,7 @@ impl NetworkGuard {
             .as_deref()
             .map(|p| p.trim() == new_ip.trim() || p.trim() == tel.ip.trim())
             .unwrap_or(false);
-        let all_green = reports
+        let all_green = relevant
             .iter()
             .all(|r| r.overall_status == OverallStatus::Green);
 
@@ -556,7 +619,7 @@ impl NetworkGuard {
         // Respect preset InterceptionBehavior
         match ctx.state.get_interception_behavior().await {
             crate::state::InterceptionBehavior::AutoLockSilent => {
-                for p in KNOWN_PROVIDERS {
+                for p in &unrouted {
                     let _ = ctx.state.block_provider(p).await;
                 }
                 self.set_gate(Gate::Blocked);
@@ -574,7 +637,7 @@ impl NetworkGuard {
                     let _ = ctx.app.emit("network://changed", &worst);
                     return;
                 } else {
-                    for p in KNOWN_PROVIDERS {
+                    for p in &unrouted {
                         let _ = ctx.state.block_provider(p).await;
                     }
                     self.set_gate(Gate::Blocked);
@@ -640,7 +703,7 @@ impl NetworkGuard {
                 let ip = inner.observed_ip.clone().unwrap_or_else(|| tel.ip.clone());
                 guard.accept_locked(&ctx2, &mut inner, &ip, &tel).await;
             } else {
-                for p in KNOWN_PROVIDERS {
+                for p in ctx2.state.unrouted_providers().await {
                     let _ = ctx2.state.block_provider(p).await;
                 }
                 guard.set_gate(Gate::Blocked);
@@ -668,8 +731,9 @@ impl NetworkGuard {
             ctx.hold_queue.remove(&p.id).await;
         }
 
+        // Routed providers keep their own (route) history.
         let now = crate::auditor::network::current_timestamp();
-        for p in KNOWN_PROVIDERS {
+        for p in ctx.state.unrouted_providers().await {
             let entry = IpHistoryEntry::new(tel.ip.clone(), tel.country_code.clone(), tel.asn, now);
             let _ = ctx.state.record_ip_history(p, entry).await;
         }
@@ -699,13 +763,15 @@ impl NetworkGuard {
         let Some(ctx) = self.ctx.get() else {
             return;
         };
+        // Only the explicit toggle lifts the manual kill-switch.
+        if self.is_manual_killswitch() {
+            return;
+        }
         let mut inner = self.inner.lock().await;
         if self.gate() == Gate::Open {
             return;
         }
-        let upstream_opt = ctx.state.get_upstream_proxy().await;
-        let active_upstream = upstream_opt.as_ref().filter(|c| c.enabled);
-        if let Ok(tel) = ctx.auditor.resolver.resolve_with_upstream(false, active_upstream).await {
+        if let Ok(tel) = ctx.auditor.resolver.resolve(false).await {
             let ip = inner.observed_ip.clone().unwrap_or_else(|| tel.ip.clone());
             self.accept_locked(ctx, &mut inner, &ip, &tel).await;
         } else {
@@ -857,5 +923,34 @@ mod tests {
         for p in KNOWN_PROVIDERS {
             assert!(!state.is_provider_blocked(p).await);
         }
+    }
+
+    #[tokio::test]
+    async fn test_manual_killswitch_flag_is_distinct_from_automatic_freeze() {
+        let guard = Arc::new(NetworkGuard::new());
+        let state = AppState::new_in_memory();
+        let mut kill_rx = guard.subscribe_killswitch();
+
+        // Automatic freeze (VPN drop simulation): gate closes, kill flag stays off.
+        guard.freeze_for_test().await;
+        assert_eq!(guard.gate(), Gate::Blocked);
+        assert!(!guard.is_manual_killswitch());
+        guard.set_gate(Gate::Pending);
+        assert!(!guard.is_manual_killswitch());
+
+        // Manual kill-switch: explicit flag, observable by routed tunnels.
+        guard.set_manual_killswitch(true, &state).await;
+        assert!(guard.is_manual_killswitch());
+        assert!(kill_rx.changed().await.is_ok());
+        assert!(*kill_rx.borrow_and_update());
+
+        // accept_current (popup "allow") must not lift the manual kill-switch.
+        guard.accept_current().await;
+        assert!(guard.is_manual_killswitch());
+        assert_eq!(guard.gate(), Gate::Blocked);
+
+        guard.set_manual_killswitch(false, &state).await;
+        assert!(!guard.is_manual_killswitch());
+        assert_eq!(guard.gate(), Gate::Open);
     }
 }

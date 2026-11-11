@@ -159,14 +159,11 @@ pub fn apply_ide_settings_file_with_tz(
             "NO_PROXY".to_string(),
             Value::String(NO_PROXY_VALUE.to_string()),
         );
-        if let Some(timezone) = tz {
-            let trimmed = timezone.trim();
-            if !trimmed.is_empty() {
-                env_map.insert("TZ".to_string(), Value::String(trimmed.to_string()));
-                env_map.insert("LANG".to_string(), Value::String("en_US.UTF-8".to_string()));
-                env_map.insert("LC_TIME".to_string(), Value::String("en_US.UTF-8".to_string()));
-                env_map.insert("LC_ALL".to_string(), Value::String("en_US.UTF-8".to_string()));
-            }
+        if let Some(timezone) = tz.and_then(super::shell_rc::sanitize_timezone) {
+            env_map.insert("TZ".to_string(), Value::String(timezone));
+            env_map.insert("LANG".to_string(), Value::String("en_US.UTF-8".to_string()));
+            env_map.insert("LC_TIME".to_string(), Value::String("en_US.UTF-8".to_string()));
+            env_map.insert("LC_ALL".to_string(), Value::String("en_US.UTF-8".to_string()));
         }
     }
 

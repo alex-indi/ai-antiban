@@ -80,12 +80,12 @@ pub fn update_tray_from_report(
 
         if let Some(status_item) = app.try_state::<TrayStatusMenuItem>() {
             let (header_text, header_icon) = if has_blocked {
-                ("Застава v1.3.0 — СТОП СЕТИ", TRAY_ICON_RED)
+                (concat!("Застава v", env!("CARGO_PKG_VERSION"), " — СТОП СЕТИ"), TRAY_ICON_RED)
             } else {
                 match report.overall_status {
-                    auditor::OverallStatus::Green => ("Застава v1.3.0 — Шлюз активен", TRAY_ICON_GREEN),
-                    auditor::OverallStatus::Yellow => ("Застава v1.3.0 — Требуется внимание", TRAY_ICON_YELLOW),
-                    auditor::OverallStatus::Red => ("Застава v1.3.0 — СТОП СЕТИ", TRAY_ICON_RED),
+                    auditor::OverallStatus::Green => (concat!("Застава v", env!("CARGO_PKG_VERSION"), " — Шлюз активен"), TRAY_ICON_GREEN),
+                    auditor::OverallStatus::Yellow => (concat!("Застава v", env!("CARGO_PKG_VERSION"), " — Требуется внимание"), TRAY_ICON_YELLOW),
+                    auditor::OverallStatus::Red => (concat!("Застава v", env!("CARGO_PKG_VERSION"), " — СТОП СЕТИ"), TRAY_ICON_RED),
                 }
             };
             let _ = status_item.0.set_text(header_text);

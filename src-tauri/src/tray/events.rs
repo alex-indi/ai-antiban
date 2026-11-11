@@ -65,11 +65,11 @@ pub fn handle_menu_event(
                     Ok(res) => {
                         if let Some(st) = app_handle.try_state::<state::AppState>() {
                             let _ = st.set_pinned_ip(res.pinned_ip_updated.clone()).await;
-                            if let Some(ref key) = res.bound_upstream_key_updated {
-                                if let Ok(parsed) = proxy::upstream::parse_upstream_key(key) {
-                                    let _ = st.set_upstream_proxy(Some(parsed)).await;
-                                }
-                            }
+                            let _ = crate::routing::apply_profile_key(
+                                &st,
+                                res.bound_upstream_key_updated.as_deref(),
+                            )
+                            .await;
                         }
                         update_tray_status(&app_handle, "green", Some(&format!("Профиль: {}", res.active_profile.name)));
                         let _ = app_handle.emit("tray://profile-switched", &res);

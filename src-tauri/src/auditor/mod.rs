@@ -25,6 +25,7 @@ pub use os_env::{
     check_os_location_services, evaluate_locale_env_hygiene, evaluate_system_timezone,
 };
 pub use rules::RuleSet;
+use crate::routing::{Route, RouteSelection};
 use crate::state::AppState;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -77,18 +78,61 @@ impl Auditor {
         Ok(Self { rules, resolver })
     }
 
-    /// Evaluates complete 9-point risk assessment for the target AI provider.
+    /// Telemetry of the egress `provider` traffic actually uses: its route, or direct.
+    /// A selected but unusable route is an error (never silently replaced by the direct egress).
+    pub async fn resolve_for_provider(
+        &self,
+        provider: ProviderId,
+        state: &AppState,
+        force_refresh: bool,
+    ) -> Result<NetworkTelemetry, String> {
+        match state.route_selection(provider.as_str()).await {
+            RouteSelection::Direct => self.resolver.resolve(force_refresh).await,
+            RouteSelection::Missing(id) => Err(format!(
+                "Маршрут {id} для {} не найден: трафик заблокирован",
+                provider.display_name()
+            )),
+            RouteSelection::Route(route) => {
+                if let Err(reason) = route.check_usable(network::current_timestamp()) {
+                    return Err(format!(
+                        "Маршрут «{}» недоступен ({}): трафик {} заблокирован",
+                        route.label,
+                        reason.message(),
+                        provider.display_name()
+                    ));
+                }
+                self.resolve_route(&route, state, force_refresh).await
+            }
+        }
+    }
+
+    /// Resolves the exit of a route and records it (incl. the declared `exit_ip` check).
+    pub async fn resolve_route(
+        &self,
+        route: &Route,
+        state: &AppState,
+        force_refresh: bool,
+    ) -> Result<NetworkTelemetry, String> {
+        let tel = self.resolver.resolve_with_route(force_refresh, Some(route)).await?;
+        state.route_health().record_exit(
+            &route.id,
+            &tel.ip,
+            &tel.country_code,
+            route.exit_ip.as_deref(),
+        );
+        Ok(tel)
+    }
+
+    /// Evaluates complete 12-point risk assessment for the target AI provider,
+    /// on the egress of that provider's route (or the direct egress).
     pub async fn evaluate_all(
         &self,
         provider: ProviderId,
         state: &AppState,
         force_refresh_telemetry: bool,
     ) -> Result<RiskReport, String> {
-        let upstream_opt = state.get_upstream_proxy().await;
-        let active_upstream = upstream_opt.as_ref().filter(|c| c.enabled);
         let telemetry = self
-            .resolver
-            .resolve_with_upstream(force_refresh_telemetry, active_upstream)
+            .resolve_for_provider(provider, state, force_refresh_telemetry)
             .await?;
 
         let matrix = self.rules.provider_matrix.read().await;

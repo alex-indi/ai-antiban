@@ -17,8 +17,10 @@ pub async fn toggle_sysproxy(
         let tz = if let Some(ref synced) = state_data.synced_ai_timezone {
             Some(synced.clone())
         } else {
-            let upstream_opt = state_data.upstream_proxy.as_ref().filter(|c| c.enabled);
-            if let Ok(tel) = auditor.resolver.resolve_with_upstream(false, upstream_opt).await {
+            if let Ok(tel) = auditor
+                .resolve_for_provider(auditor::ProviderId::Anthropic, &state, false)
+                .await
+            {
                 if !is_sanctioned_or_blocked_country(&tel.country_code) && tel.timezone.is_some() {
                     let detected = tel.timezone.unwrap();
                     let _ = state.set_synced_ai_timezone(Some(detected.clone())).await;
@@ -49,8 +51,10 @@ pub async fn enable_cli_protection(
     let tz = if let Some(ref synced) = state_data.synced_ai_timezone {
         Some(synced.clone())
     } else {
-        let upstream_opt = state_data.upstream_proxy.as_ref().filter(|c| c.enabled);
-        if let Ok(tel) = auditor.resolver.resolve_with_upstream(false, upstream_opt).await {
+        if let Ok(tel) = auditor
+            .resolve_for_provider(auditor::ProviderId::Anthropic, &state, false)
+            .await
+        {
             if !is_sanctioned_or_blocked_country(&tel.country_code) && tel.timezone.is_some() {
                 let detected = tel.timezone.unwrap();
                 let _ = state.set_synced_ai_timezone(Some(detected.clone())).await;

@@ -6,6 +6,7 @@ pub mod crash_test;
 pub mod domains;
 pub mod interception;
 pub mod payment;
+pub mod routes;
 pub mod sysproxy;
 pub mod updates;
 pub mod upstream;
