@@ -1,6 +1,6 @@
 import { useState } from "react";
-import { Badge, Banner, Button, Card, Mono, Row, Rows, Segmented } from "../../ui";
-import { guides as copy } from "../../shared/copy/guides-subscription";
+import { Badge, Banner, Button, Card, Mono, Row, Rows, Segmented, Steps } from "../../ui";
+import { common, guides as copy } from "../../shared/copy/ru";
 import { openExternal } from "../../utils/opener";
 import { CopyBlock } from "./CopyBlock";
 import {
@@ -14,7 +14,6 @@ import {
   XHTTP_SETTINGS_LINES,
 } from "./commands";
 import { useGuide } from "./context";
-import { GuideSteps } from "./GuideSteps";
 import { HostingList } from "./HostingList";
 import { Rich } from "./Rich";
 import type { VpsMethod } from "./routing";
@@ -66,8 +65,10 @@ function AmneziaMethod({ onMethodChange }: { onMethodChange: (method: VpsMethod)
   return (
     <>
       <Card>
-        <GuideSteps
-          steps={[
+        <Steps
+          collapsible
+          nextLabel={common.next}
+          items={[
             {
               title: t.step1Title,
               text: t.step1Text,
@@ -140,8 +141,10 @@ function VlessMethod() {
       <p className="guides-lead">
         <Rich text={t.intro} />
       </p>
-      <GuideSteps
-        steps={[
+      <Steps
+        collapsible
+        nextLabel={common.next}
+        items={[
           {
             title: t.step1Title,
             text: <Rich text={t.step1Text} />,
@@ -176,8 +179,10 @@ function CascadeMethod() {
 
   return (
     <Card>
-      <GuideSteps
-        steps={[
+      <Steps
+        collapsible
+        nextLabel={common.next}
+        items={[
           {
             title: t.step1Title,
             text: t.step1Text,

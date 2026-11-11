@@ -4,7 +4,7 @@ import { resetCrashTestDrop, runVpnCrashTestStep, triggerCrashTestDrop } from ".
 import { Badge, Banner, Button, Modal, Mono, Row, Rows, Section, Stat, Stats, Steps } from "../../ui";
 import type { StepItem } from "../../ui";
 import type { ShowToast } from "../../shared/hooks";
-import { crashTest as copy } from "../../shared/copy/checks-backup-settings";
+import { crashTest as copy } from "../../shared/copy/ru";
 import "./crash-test.css";
 
 export interface CrashTestModalProps {

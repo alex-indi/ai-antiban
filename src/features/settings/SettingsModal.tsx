@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type { FormEvent } from "react";
 import type { InterceptionBehavior, PopupPosition } from "../../types";
+import type { ShowToast } from "../../shared/hooks";
 import {
   addCustomAiDomain,
   forceCleanOsProxy,
@@ -12,16 +13,13 @@ import {
   setPopupPosition,
 } from "../../utils/api";
 import { openExternal } from "../../utils/opener";
-import { Badge, Banner, Button, Field, Link, Modal, Mono, Row, Rows, Section, Segmented, Switch } from "../../ui";
+import { Badge, Banner, Button, ConfirmModal, Field, Link, Modal, Mono, Row, Rows, Section, Segmented, Switch } from "../../ui";
 import type { SegmentedOption } from "../../ui";
-import { settings as copy } from "../../shared/copy/checks-backup-settings";
-import { ConfirmModal } from "../common/ConfirmModal";
+import { settings as copy } from "../../shared/copy/ru";
+
 import "./settings.css";
 
 const SOURCE_URL = "https://github.com/kingbest1195/ai-antiban";
-
-/** Тип уведомления этого окна; оболочка переводит «warn» в «warning». */
-type SettingsToast = (title: string, msg: string, type?: "success" | "warn" | "info") => void;
 
 export interface SettingsModalProps {
   open: boolean;
@@ -32,7 +30,7 @@ export interface SettingsModalProps {
   popupPosition?: PopupPosition;
   customAiDomains?: string[];
   onStateUpdated?: () => void;
-  onToast?: SettingsToast;
+  onToast?: ShowToast;
 }
 
 const BEHAVIOR_OPTIONS: SegmentedOption<InterceptionBehavior>[] = (
@@ -103,7 +101,7 @@ export function SettingsModal({
       onStateUpdated?.();
       onToast?.(copy.behavior.toastTitle, copy.behavior.toastText[next], "success");
     } catch (err) {
-      onToast?.(copy.behavior.saveError, errText(err), "warn");
+      onToast?.(copy.behavior.saveError, errText(err), "warning");
     }
   };
 
@@ -114,7 +112,7 @@ export function SettingsModal({
       onStateUpdated?.();
       onToast?.(copy.position.toastTitle, copy.position.toastText[next], "info");
     } catch (err) {
-      onToast?.(copy.behavior.saveError, errText(err), "warn");
+      onToast?.(copy.behavior.saveError, errText(err), "warning");
     }
   };
 
@@ -137,7 +135,7 @@ export function SettingsModal({
       onStateUpdated?.();
       onToast?.(copy.domains.addedTitle, copy.domains.addedText(domain), "success");
     } catch (err) {
-      onToast?.(copy.domains.addError, errText(err), "warn");
+      onToast?.(copy.domains.addError, errText(err), "warning");
     } finally {
       setDomainBusy(false);
     }
@@ -151,7 +149,7 @@ export function SettingsModal({
       onStateUpdated?.();
       onToast?.(copy.domains.removedTitle, copy.domains.removedText(domain), "info");
     } catch (err) {
-      onToast?.(copy.domains.removeError, errText(err), "warn");
+      onToast?.(copy.domains.removeError, errText(err), "warning");
     } finally {
       setDomainBusy(false);
     }
@@ -167,7 +165,7 @@ export function SettingsModal({
     } catch (err) {
       const message = errText(err);
       setProxyResult({ ok: false, text: message });
-      onToast?.(copy.proxy.toastError, message, "warn");
+      onToast?.(copy.proxy.toastError, message, "warning");
     } finally {
       setCleaningProxy(false);
       setConfirmProxy(false);

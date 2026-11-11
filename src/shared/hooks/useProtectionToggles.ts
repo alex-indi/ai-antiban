@@ -10,6 +10,11 @@ import {
 import { toast as t } from "../copy/ru";
 import type { ShowToast } from "./useToasts";
 
+export interface CliToggleOptions {
+  /** Без копирования shell-команды в буфер и без уведомления об успехе (онбординг). Ошибки показываются всегда. */
+  quiet?: boolean;
+}
+
 interface Options {
   sysproxyActive: boolean;
   setSysproxyActive: (value: boolean) => void;
@@ -44,23 +49,29 @@ export function useProtectionToggles({ sysproxyActive, setSysproxyActive, showTo
     }
   }, [sysproxyActive, setSysproxyActive, showToast]);
 
-  const handleToggleCliProtection = useCallback(async () => {
+  const handleToggleCliProtection = useCallback(async (options?: CliToggleOptions) => {
+    // Switch.onChange может передать своё значение, поэтому смотрим строго на флаг.
+    const quiet = options?.quiet === true;
     try {
       if (cliProtected) {
         await disableCliProtection();
         setCliProtected(false);
-        showToast(t.cli.offTitle, t.cli.offText, "info");
+        if (!quiet) showToast(t.cli.offTitle, t.cli.offText, "info");
       } else {
         const report = await enableCliProtection();
-        try {
-          await navigator.clipboard.writeText(report.shell_command);
-        } catch {
-          // буфер обмена необязателен
+        if (!quiet) {
+          try {
+            await navigator.clipboard.writeText(report.shell_command);
+          } catch {
+            // буфер обмена необязателен
+          }
         }
         setCliProtected(true);
-        const targets =
-          report.configured_targets.length > 0 ? report.configured_targets.join(", ") : t.cli.onFallbackTargets;
-        showToast(t.cli.onTitle, t.cli.onText(targets), "success");
+        if (!quiet) {
+          const targets =
+            report.configured_targets.length > 0 ? report.configured_targets.join(", ") : t.cli.onFallbackTargets;
+          showToast(t.cli.onTitle, t.cli.onText(targets), "success");
+        }
       }
     } catch (err: any) {
       showToast(t.cli.error, err?.message || String(err), "error");

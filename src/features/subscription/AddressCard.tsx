@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Button, Card, Mono, Row, Rows, TabPanel, Tabs } from "../../ui";
-import { subscription } from "../../shared/copy/guides-subscription";
+import { subscription } from "../../shared/copy/ru";
 import type { ShowToast } from "../../shared/hooks";
 import { useCopy } from "../guides/useCopy";
 import { TAX_FREE_ADDRESSES } from "./addresses";

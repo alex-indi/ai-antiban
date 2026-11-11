@@ -3,7 +3,7 @@ import { isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Banner, Card, Row, Rows, Section } from "../../ui";
 import { simulateInterception } from "../../utils/api";
-import { onboarding as copy } from "../../shared/copy/onboarding";
+import { onboarding as copy } from "../../shared/copy/ru";
 import { AlertOverlay } from "../alert";
 import { StepFooter, StepFrame } from "./parts";
 

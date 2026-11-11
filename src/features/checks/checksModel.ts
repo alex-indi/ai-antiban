@@ -1,6 +1,6 @@
 import type { AppStateData, CheckResult, RiskReport } from "../../types";
-import { checks as copy } from "../../shared/copy/checks-backup-settings";
-import type { CheckGroupId, CheckId } from "../../shared/copy/checks-backup-settings";
+import { checks as copy } from "../../shared/copy/ru";
+import type { CheckGroupId, CheckId } from "../../shared/copy/ru";
 
 /** Что можно сделать с непройденной проверкой. */
 export type CheckAction = "pin" | "sync-timezone" | "guide";

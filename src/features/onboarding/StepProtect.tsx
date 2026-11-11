@@ -1,5 +1,5 @@
 import { Banner, Card, Row, Rows, Switch } from "../../ui";
-import { onboarding as copy } from "../../shared/copy/onboarding";
+import { onboarding as copy } from "../../shared/copy/ru";
 import { StepFooter, StepFrame } from "./parts";
 
 export interface StepProtectProps {

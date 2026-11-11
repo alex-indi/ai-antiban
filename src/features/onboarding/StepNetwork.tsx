@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ProviderId, RiskReport } from "../../types";
 import { Badge, Banner, Card, EmptyState, Progress, Skeleton, StatusHero } from "../../ui";
-import { onboarding as copy } from "../../shared/copy/onboarding";
+import { onboarding as copy } from "../../shared/copy/ru";
 import { checksWord } from "../../shared/lib/format";
 import { evaluateNetwork } from "./networkVerdict";
 import { StepFooter, StepFrame } from "./parts";

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ShowToast } from "../../shared/hooks";
-import { common } from "../../shared/copy/guides-subscription";
+import { common } from "../../shared/copy/ru";
 
 interface CopyNotice {
   title: string;

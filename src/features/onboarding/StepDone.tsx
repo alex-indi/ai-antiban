@@ -1,5 +1,5 @@
 import { Card, Row, Rows } from "../../ui";
-import { onboarding as copy } from "../../shared/copy/onboarding";
+import { onboarding as copy } from "../../shared/copy/ru";
 import { StepFooter, StepFrame } from "./parts";
 
 const IS_MAC = typeof navigator !== "undefined" && /Mac|iPhone|iPad/i.test(navigator.platform || navigator.userAgent);

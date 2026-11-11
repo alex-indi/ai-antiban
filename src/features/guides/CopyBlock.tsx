@@ -1,8 +1,8 @@
-import { Button } from "../../ui";
-import { common, guides } from "../../shared/copy/guides-subscription";
+import { CopyBlock as CopyBlockView } from "../../ui";
+import { common, guides } from "../../shared/copy/ru";
 import { useGuide } from "./context";
 
-export interface CopyBlockProps {
+export interface GuideCopyBlockProps {
   id: string;
   /** Что показываем и копируем ровно так, как написано. Несколько строк — многострочный блок. */
   lines: string[];
@@ -12,28 +12,18 @@ export interface CopyBlockProps {
   noticeTitle?: string;
 }
 
-/** Блок команды или адреса: моноширинный текст и кнопка «Скопировать» (после клика — «Скопировано»). */
-export function CopyBlock({ id, lines, label, noticeTitle = guides.toast.commandCopied }: CopyBlockProps) {
+/** Блок команды из ридера гайдов: ui/CopyBlock, привязанный к состоянию «скопировано» и уведомлению ридера. */
+export function CopyBlock({ id, lines, label, noticeTitle = guides.toast.commandCopied }: GuideCopyBlockProps) {
   const { copiedId, copy } = useGuide();
-  const done = copiedId === id;
   return (
-    <div className="guides-code" role="group" aria-label={label}>
-      <pre className="guides-code__text">
-        {lines.join("\n")}
-      </pre>
-      <div className="guides-code__foot">
-        <Button
-          size="sm"
-          icon={done ? "check" : "copy"}
-          aria-label={guides.actions.copyCommandAria(label)}
-          onClick={() => copy(id, lines.join("\n"), { title: noticeTitle, text: label })}
-        >
-          {done ? common.copied : common.copy}
-        </Button>
-        <span className="zs-sr" role="status">
-          {done ? common.copied : ""}
-        </span>
-      </div>
-    </div>
+    <CopyBlockView
+      lines={lines}
+      label={label}
+      copied={copiedId === id}
+      copyLabel={common.copy}
+      copiedLabel={common.copied}
+      copyAriaLabel={guides.actions.copyCommandAria(label)}
+      onCopy={(text) => copy(id, text, { title: noticeTitle, text: label })}
+    />
   );
 }

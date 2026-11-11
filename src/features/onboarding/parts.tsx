@@ -2,7 +2,7 @@ import { useEffect, useRef } from "react";
 import type { ReactNode } from "react";
 import { Button } from "../../ui";
 import type { ButtonProps } from "../../ui";
-import { onboarding as copy } from "../../shared/copy/onboarding";
+import { onboarding as copy } from "../../shared/copy/ru";
 
 /** Каркас шага: заголовок (на него переходит фокус), короткое пояснение, тело и подвал с действиями. */
 export function StepFrame({

@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Badge, Banner, Button, Card, Segmented } from "../../ui";
-import { guides as copy } from "../../shared/copy/guides-subscription";
+import { guides as copy } from "../../shared/copy/ru";
 import { openOsDatetimeSettings, syncAiAgentsTimezone } from "../../utils/api";
 import { CopyBlock } from "./CopyBlock";
 import { CMD_TZ_MAC, PROXY_EXPORT_LINE } from "./commands";

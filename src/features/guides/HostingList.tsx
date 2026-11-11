@@ -1,5 +1,5 @@
 import { Badge, Button, Row } from "../../ui";
-import { common, guides } from "../../shared/copy/guides-subscription";
+import { common, guides } from "../../shared/copy/ru";
 import { openExternal } from "../../utils/opener";
 import { VPS_PROVIDERS } from "./providers";
 import type { VpsProvider } from "./providers";

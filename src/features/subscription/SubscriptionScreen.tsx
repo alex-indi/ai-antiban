@@ -1,7 +1,7 @@
 import { useState } from "react";
 import type { AppStateData, RiskReport } from "../../types";
 import { Segmented } from "../../ui";
-import { subscription as copy } from "../../shared/copy/guides-subscription";
+import { subscription as copy } from "../../shared/copy/ru";
 import type { ShowToast } from "../../shared/hooks";
 import { AddressCard } from "./AddressCard";
 import { CardCheck } from "./CardCheck";

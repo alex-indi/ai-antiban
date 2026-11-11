@@ -1,6 +1,6 @@
 import { Banner, Button, Card, EmptyState, Mono, Progress, Row, Rows, Section, Skeleton, Stat, Stats } from "../../ui";
 import type { ClaudeBackup } from "../../shared/hooks";
-import { backup as copy } from "../../shared/copy/checks-backup-settings";
+import { backup as copy } from "../../shared/copy/ru";
 import { formatNumber } from "../../shared/lib/format";
 
 /** Блок «Архив Claude»: сводка найденного, одна brand-кнопка, прогресс и результат. */

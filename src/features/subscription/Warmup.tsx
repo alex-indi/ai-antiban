@@ -2,7 +2,7 @@ import type { StepItem } from "../../ui";
 import type { AppStateData } from "../../types";
 import { setWarmupTimer } from "../../utils/api";
 import { Badge, Button, Card, Progress, Row, Rows, Section, Stat, Stats, Steps } from "../../ui";
-import { subscription } from "../../shared/copy/guides-subscription";
+import { subscription } from "../../shared/copy/ru";
 import type { ShowToast } from "../../shared/hooks";
 
 const copy = subscription.warmup;

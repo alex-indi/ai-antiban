@@ -1,10 +1,10 @@
 import { useState } from "react";
 import type { AppStateData, RiskReport } from "../../types";
-import { Badge, Button, Card, Icon, Link, Mono, Row, Rows, Section, Skeleton } from "../../ui";
+import { Badge, Button, Card, ExpandRow, Link, Mono, Row, Rows, Section, Skeleton } from "../../ui";
 import type { IconName, Tone } from "../../ui";
 import { status as words } from "../../shared/copy/ru";
-import { checks as copy } from "../../shared/copy/checks-backup-settings";
-import type { CheckId } from "../../shared/copy/checks-backup-settings";
+import { checks as copy } from "../../shared/copy/ru";
+import type { CheckId } from "../../shared/copy/ru";
 import { buildChecks, isCriticalStatus } from "./checksModel";
 import type { CheckItem } from "./checksModel";
 import "./checks.css";
@@ -157,7 +157,7 @@ export function ChecksScreen({
   );
 }
 
-/* ---------- Строка проверки с раскрытием ---------- */
+/* ---------- Строка проверки: ExpandRow с подробностями ---------- */
 
 interface CheckRowProps {
   item: CheckItem;
@@ -169,76 +169,61 @@ interface CheckRowProps {
 }
 
 function CheckRow({ item, view, open, onToggle, onAction, onGuide }: CheckRowProps) {
-  const detailId = `check-${item.id}`;
-  const iconTone = view.tone === "ok" ? "ok" : view.tone === "warn" ? "warn" : view.tone === "danger" ? "danger" : null;
   const actionLabel =
     item.action === "pin" ? copy.actions.pin : item.action === "sync-timezone" ? copy.actions.syncTimezone : copy.actions.openGuide;
   // Инструкция отдельной ссылкой — только если главное действие другое.
   const showGuideLink = item.result.guide_ref && item.action !== "guide";
 
   return (
-    <li className="zs-check">
-      <button
-        type="button"
-        className="zs-check__head"
-        aria-expanded={open}
-        aria-controls={detailId}
-        onClick={onToggle}
-      >
-        <span className={iconTone ? `zs-row__icon zs-row__icon--${iconTone}` : "zs-row__icon"}>
-          <Icon name={ICONS[item.id]} />
-        </span>
-        <span className="zs-row__body">
-          <span className="zs-row__title">{item.title}</span>
-          <span className="zs-row__sub">{item.what}</span>
-        </span>
-        <span className="zs-row__trail">
-          <Badge tone={view.tone} icon={view.icon}>
-            {view.word}
-          </Badge>
-          <Icon name="chev" className="zs-check__chev" />
-        </span>
-      </button>
-
-      {open && (
-        <div id={detailId} className="zs-check__detail" role="region" aria-label={item.title}>
-          <div>
-            <p className="zs-check__label">{copy.detail.result}</p>
-            <p className="zs-check__message">{item.result.message}</p>
-          </div>
-          {item.data.length > 0 && (
-            <dl className="zs-check__data">
-              {item.data.map((d) => (
-                <div key={d.label} className="zs-check__pair">
-                  <dt>{d.label}</dt>
-                  <dd>{d.mono ? <Mono>{d.value}</Mono> : d.value}</dd>
-                </div>
-              ))}
-            </dl>
-          )}
-          {(item.action || showGuideLink) && (
-            <div className="zs-check__actions">
-              {item.action && (
-                <Button size="sm" icon={item.action === "guide" ? undefined : item.action === "pin" ? "lock" : "refresh"} onClick={onAction}>
-                  {actionLabel}
-                </Button>
-              )}
-              {showGuideLink && (
-                <Link
-                  href="#"
-                  chevron
-                  onClick={(e) => {
-                    e.preventDefault();
-                    onGuide();
-                  }}
-                >
-                  {copy.actions.openGuide}
-                </Link>
-              )}
+    <ExpandRow
+      icon={ICONS[item.id]}
+      tone={view.tone === "ok" || view.tone === "warn" || view.tone === "danger" ? view.tone : "neutral"}
+      title={item.title}
+      sub={item.what}
+      trail={
+        <Badge tone={view.tone} icon={view.icon}>
+          {view.word}
+        </Badge>
+      }
+      open={open}
+      onToggle={onToggle}
+      detailLabel={item.title}
+    >
+      <div>
+        <p className="zs-check__label">{copy.detail.result}</p>
+        <p className="zs-check__message">{item.result.message}</p>
+      </div>
+      {item.data.length > 0 && (
+        <dl className="zs-check__data">
+          {item.data.map((d) => (
+            <div key={d.label} className="zs-check__pair">
+              <dt>{d.label}</dt>
+              <dd>{d.mono ? <Mono>{d.value}</Mono> : d.value}</dd>
             </div>
+          ))}
+        </dl>
+      )}
+      {(item.action || showGuideLink) && (
+        <div className="zs-check__actions">
+          {item.action && (
+            <Button size="sm" icon={item.action === "guide" ? undefined : item.action === "pin" ? "lock" : "refresh"} onClick={onAction}>
+              {actionLabel}
+            </Button>
+          )}
+          {showGuideLink && (
+            <Link
+              href="#"
+              chevron
+              onClick={(e) => {
+                e.preventDefault();
+                onGuide();
+              }}
+            >
+              {copy.actions.openGuide}
+            </Link>
           )}
         </div>
       )}
-    </li>
+    </ExpandRow>
   );
 }

@@ -24,14 +24,12 @@ import { OverviewScreen } from "../features/overview/OverviewScreen";
 import { ConnectScreen } from "../features/connect/ConnectScreen";
 import { AlertOverlay } from "../features/alert";
 import { OnboardingFlow, useOnboarding } from "../features/onboarding";
-import {
-  BackupTab,
-  ChecksTab,
-  CrashTestDialog,
-  GuidesTab,
-  SettingsDialog,
-  SubscriptionTab,
-} from "../features/legacy";
+import { BackupScreen } from "../features/backup";
+import { ChecksScreen } from "../features/checks";
+import { CrashTestModal } from "../features/crash-test";
+import { GuidesScreen } from "../features/guides";
+import { SettingsModal } from "../features/settings";
+import { SubscriptionScreen } from "../features/subscription";
 import { AboutModal } from "./AboutModal";
 import { EventsModal } from "./EventsModal";
 import { TimezoneModal } from "./TimezoneModal";
@@ -115,7 +113,8 @@ export function AppShell() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nav.tab, backup.claudeSummary, gw.reports.anthropic, gw.refreshing]);
 
-  const version = updater.updateInfo?.current_version || APP_VERSION;
+  // В Tauri версию отдаёт бэкенд; в браузере его ответ — мок, поэтому берём package.json.
+  const version = (isTauri() && updater.updateInfo?.current_version) || APP_VERSION;
 
   const handleOpenSupport = async () => {
     showToast(copy.toast.supportTitle, copy.toast.supportText, "info");
@@ -206,7 +205,7 @@ export function AppShell() {
               </Button>
               <h2 className="zs-t-heading">{copy.subscriptionTitle}</h2>
             </div>
-            <SubscriptionTab
+            <SubscriptionScreen
               vpnCountry={gw.currentCountry}
               activeReport={gw.activeReport}
               state={gw.state}
@@ -295,7 +294,7 @@ export function AppShell() {
             </TabPanel>
 
             <TabPanel idPrefix={TAB_PREFIX} id="checks" selected={nav.tab === "checks"}>
-              <ChecksTab
+              <ChecksScreen
                 report={gw.activeReport}
                 state={gw.state}
                 onNavigateToGuide={nav.openGuide}
@@ -303,11 +302,13 @@ export function AppShell() {
                 onPinCurrentIp={pinning.handlePinIp}
                 onSyncTimezone={() => tz.handleSyncTz()}
                 onOpenCrashTest={() => setCrashTestOpen(true)}
+                onRecheck={() => runFullAudit(true)}
+                rechecking={gw.refreshing}
               />
             </TabPanel>
 
             <TabPanel idPrefix={TAB_PREFIX} id="backup" selected={nav.tab === "backup"}>
-              <BackupTab
+              <BackupScreen
                 backup={backup}
                 currentIp={gw.currentIp}
                 currentCountry={gw.currentCountry}
@@ -321,7 +322,7 @@ export function AppShell() {
             </TabPanel>
 
             <TabPanel idPrefix={TAB_PREFIX} id="guides" selected={nav.tab === "guides"}>
-              <GuidesTab
+              <GuidesScreen
                 initialGuide={nav.guideTarget}
                 currentIp={gw.currentIp}
                 currentTimezone={gw.activeReport?.telemetry?.timezone}
@@ -348,16 +349,18 @@ export function AppShell() {
       </div>
 
       {/* Диалоги */}
-      <SettingsDialog
+      <SettingsModal
         open={settingsOpen}
         onClose={() => setSettingsOpen(false)}
-        state={gw.state}
         autoUpdateEnabled={gw.autoUpdateEnabled}
         onToggleAutoUpdate={updater.handleToggleAutoUpdate}
+        interceptionBehavior={gw.state?.interception_behavior}
+        popupPosition={gw.state?.popup_position}
+        customAiDomains={gw.state?.custom_ai_domains}
         onStateUpdated={() => refreshState().catch(() => {})}
         onToast={showToast}
       />
-      <CrashTestDialog open={crashTestOpen} onClose={() => setCrashTestOpen(false)} onToast={showToast} />
+      <CrashTestModal open={crashTestOpen} onClose={() => setCrashTestOpen(false)} onToast={showToast} />
       <TimezoneModal
         open={timezoneOpen}
         onClose={() => setTimezoneOpen(false)}
@@ -392,7 +395,7 @@ export function AppShell() {
           sysproxyActive={gw.sysproxyActive}
           cliProtected={toggles.cliProtected}
           onToggleSysproxy={toggles.handleToggleSysproxy}
-          onToggleCli={toggles.handleToggleCliProtection}
+          onToggleCli={() => toggles.handleToggleCliProtection({ quiet: true })}
           onRecheck={() => runFullAudit(true, true)}
           onClose={(to) => {
             onboarding.finish();

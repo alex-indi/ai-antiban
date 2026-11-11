@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Card, Row, Rows, Segmented } from "../../ui";
-import { guides as copy } from "../../shared/copy/guides-subscription";
+import { guides as copy } from "../../shared/copy/ru";
 import type { ShowToast } from "../../shared/hooks";
 import { openTelegramSupport } from "../../utils/opener";
 import { GuideContext } from "./context";

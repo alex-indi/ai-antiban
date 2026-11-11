@@ -1,9 +1,4 @@
-/* Гайды: только токены. Блок команды и вспомогательная вёрстка шагов; всё остальное — примитивы src/ui. */
-
-/* Блок команды или адреса: слой bg-2 внутри карточки, моноширинный текст, кнопка «Скопировать» */
-.guides-code{display:flex;flex-direction:column;gap:var(--space-2);margin:var(--space-2) 0;padding:var(--space-3);border-radius:var(--radius-md);background:var(--bg-2)}
-.guides-code__text{margin:0;font-family:var(--font-mono);font-size:13px;line-height:18px;font-weight:500;color:var(--ink);white-space:pre-wrap;word-break:break-all;user-select:all}
-.guides-code__foot{display:flex;justify-content:flex-end}
+/* Гайды: только токены. Вспомогательная вёрстка текста и карточек; всё остальное — примитивы src/ui. */
 
 /* Подписи и абзацы внутри карточек и шагов */
 .guides-lead{margin:0 0 var(--space-3);color:var(--ink-2)}
@@ -18,13 +13,6 @@
 .guides-way>.guides-code{align-self:stretch}
 .guides-list{margin:0;padding-left:var(--space-5);list-style:decimal;color:var(--ink-2)}
 .guides-list li+li{margin-top:var(--space-2)}
-
-/* Шаги: заголовок — кнопка раскрытия, содержимое раскрытого шага */
-.guides-step__toggle{display:block;width:100%;min-height:28px;margin:0;padding:0;border:0;background:none;color:inherit;font:inherit;font-weight:600;text-align:left;cursor:pointer;border-radius:var(--radius-sm)}
-.guides-step__toggle:hover{color:var(--ink-2)}
-.guides-step__panel{display:flex;flex-direction:column;gap:var(--space-2);margin-top:var(--space-2)}
-.guides-step__panel>.zs-btn{align-self:flex-start}
-.guides-step__panel>.zs-rows{margin-top:var(--space-1)}
 
 /* Письмо хостинга: заголовок с бейджем и строки данных */
 .guides-mail{margin-top:var(--space-2);padding:var(--space-3);border-radius:var(--radius-md);background:var(--bg-2)}

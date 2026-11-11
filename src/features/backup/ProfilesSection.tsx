@@ -9,13 +9,12 @@ import {
   listClaudeProfiles,
   switchClaudeProfile,
 } from "../../utils/api";
-import { Badge, Button, Card, EmptyState, Field, Menu, Modal, Mono, Row, Rows, Section, Skeleton, Switch } from "../../ui";
+import { Badge, Button, Card, ConfirmModal, EmptyState, Field, Menu, Modal, Mono, Row, Rows, Section, Skeleton, Switch } from "../../ui";
 import type { MenuEntry } from "../../ui";
 import type { ShowToast } from "../../shared/hooks";
 import { status as words } from "../../shared/copy/ru";
-import { backup as copy, confirm as confirmCopy } from "../../shared/copy/checks-backup-settings";
+import { backup as copy, common as commonCopy } from "../../shared/copy/ru";
 import { countryName } from "../../shared/lib/country";
-import { ConfirmModal } from "../common/ConfirmModal";
 
 export interface ProfilesSectionProps {
   currentIp: string;
@@ -271,7 +270,7 @@ export function ProfilesSection({ currentIp, currentCountry, onProfileSwitched, 
         footer={
           <>
             <Button onClick={() => setCreateOpen(false)} disabled={creating}>
-              {confirmCopy.cancel}
+              {commonCopy.cancel}
             </Button>
             <Button variant="primary" type="submit" form={CREATE_FORM_ID} disabled={creating || !newName.trim()}>
               {creating ? copy.create.submitting : copy.create.submit}

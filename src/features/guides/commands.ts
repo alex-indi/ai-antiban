@@ -1,4 +1,4 @@
-// Команды и ссылки гайдов. Перенесены из src/components/GuideViewer.tsx без изменений:
+// Команды и ссылки гайдов. Перенесены из прежнего GuideViewer без изменений:
 // их копируют в терминал и открывают в браузере, менять символы нельзя.
 
 export const AMNEZIA_DOWNLOAD_URL = "https://amnezia.org/ru/downloads";

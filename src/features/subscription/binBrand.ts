@@ -1,4 +1,4 @@
-import { subscription } from "../../shared/copy/guides-subscription";
+import { subscription } from "../../shared/copy/ru";
 
 const b = subscription.card.brands;
 

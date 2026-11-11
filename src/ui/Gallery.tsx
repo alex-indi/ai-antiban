@@ -8,8 +8,11 @@ import {
   Banner,
   Button,
   Card,
+  ConfirmModal,
+  CopyBlock,
   Dialog,
   EmptyState,
+  ExpandRow,
   Field,
   ICON_NAMES,
   Icon,
@@ -295,6 +298,45 @@ function ToastDemo() {
   );
 }
 
+function ExpandRowDemo() {
+  const [open, setOpen] = useState<string | null>("tz");
+  const toggle = (id: string) => setOpen((cur) => (cur === id ? null : id));
+  return (
+    <Card>
+      <Rows>
+        <ExpandRow icon="check" tone="ok" title="Спам-базы" sub="Spamhaus, SORBS, Barracuda, DroneBL" trail={<Badge tone="ok">Чисто</Badge>} open={open === "dnsbl"} onToggle={() => toggle("dnsbl")} detailLabel="Спам-базы">
+          <p style={{ margin: 0 }}>Адрес не найден ни в одной из четырёх баз.</p>
+        </ExpandRow>
+        <ExpandRow icon="alert" tone="warn" title="Часовой пояс" sub="Система: Москва. Выход: Лондон." trail={<Badge tone="warn" icon="alert">Нужна проверка</Badge>} open={open === "tz"} onToggle={() => toggle("tz")} detailLabel="Часовой пояс">
+          <p style={{ margin: 0 }}>Часовой пояс компьютера не совпадает со страной IP.</p>
+          <div><Button size="sm" icon="refresh">Синхронизировать</Button></div>
+        </ExpandRow>
+      </Rows>
+    </Card>
+  );
+}
+
+function CopyBlockDemo() {
+  const [copied, setCopied] = useState(false);
+  return (
+    <Card>
+      <CopyBlock label="Команда подключения по SSH" lines={["ssh root@45.142.214.88"]} copied={copied} onCopy={() => { setCopied(true); window.setTimeout(() => setCopied(false), 2500); }} />
+    </Card>
+  );
+}
+
+function ConfirmDemo() {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <Button variant="danger" onClick={() => setOpen(true)}>Сбросить системный прокси</Button>
+      <ConfirmModal open={open} title="Сбросить системный прокси?" confirmLabel="Сбросить прокси" onConfirm={() => setOpen(false)} onCancel={() => setOpen(false)}>
+        Прокси браузеров вернётся к состоянию до Заставы. Действие нельзя отменить.
+      </ConfirmModal>
+    </>
+  );
+}
+
 function ModalDemo() {
   const [open, setOpen] = useState(false);
   const [lang, setLang] = useState("ru");
@@ -516,6 +558,27 @@ export default function Gallery() {
           />
         </Sec>
 
+        <Sec title="ExpandRow">
+          <ExpandRowDemo />
+        </Sec>
+
+        <Sec title="Steps (collapsible)">
+          <Card>
+            <Steps
+              collapsible
+              items={[
+                { title: "Подключитесь к серверу", text: "Откройте терминал и вставьте команду.", body: <CopyBlock label="Команда подключения" lines={["ssh root@45.142.214.88"]} onCopy={noop} /> },
+                { title: "Установите VPN", body: <p style={{ margin: 0 }}>Запустите установку и дождитесь ключа.</p> },
+                { title: "Закрепите IP в Заставе", text: "Застава запомнит адрес и остановит запросы, если он сменится.", body: <Button size="sm" icon="lock">Закрепить IP</Button> },
+              ]}
+            />
+          </Card>
+        </Sec>
+
+        <Sec title="CopyBlock">
+          <CopyBlockDemo />
+        </Sec>
+
         <Sec title="Menu (кнопка «Ещё»: стрелки, Esc, клик вне)">
           <div className="gl__wrap" style={{ justifyContent: "space-between" }}><Menu items={MENU_ITEMS} align="start" label="Ещё слева" /><Menu items={MENU_ITEMS} /></div>
           <div style={{ minHeight: 280 }} />
@@ -531,8 +594,8 @@ export default function Gallery() {
           <ToastDemo />
         </Sec>
 
-        <Sec title="Modal">
-          <ModalDemo />
+        <Sec title="Modal, ConfirmModal">
+          <div className="gl__wrap"><ModalDemo /><ConfirmDemo /></div>
         </Sec>
 
         <Sec title="Progress">

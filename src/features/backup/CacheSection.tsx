@@ -1,9 +1,8 @@
 import { useState } from "react";
 import type { ProviderId } from "../../types";
-import { Button, Card, Row, Rows, Section } from "../../ui";
+import { Button, Card, ConfirmModal, Row, Rows, Section } from "../../ui";
 import type { ClaudeBackup } from "../../shared/hooks";
-import { backup as copy } from "../../shared/copy/checks-backup-settings";
-import { ConfirmModal } from "../common/ConfirmModal";
+import { backup as copy } from "../../shared/copy/ru";
 
 const CLIENTS: { provider: ProviderId; name: string; icon: "term" | "globe" }[] = [
   { provider: "anthropic", name: copy.cache.claude, icon: "term" },

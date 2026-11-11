@@ -1,6 +1,6 @@
 import { Badge, Banner, Card, Row, Steps } from "../../ui";
 import type { StepItem } from "../../ui";
-import { common, guides as copy } from "../../shared/copy/guides-subscription";
+import { common, guides as copy } from "../../shared/copy/ru";
 import { openExternal } from "../../utils/opener";
 import { useGuide } from "./context";
 import { Rich } from "./Rich";

@@ -1,5 +1,5 @@
 import { Card, Row, Rows } from "../../ui";
-import { onboarding as copy } from "../../shared/copy/onboarding";
+import { onboarding as copy } from "../../shared/copy/ru";
 import { StepFooter, StepFrame } from "./parts";
 
 /** Шаг 1: что делает Застава — одна фраза и три строки. */

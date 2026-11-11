@@ -4,7 +4,7 @@ import type { BinAuditResult } from "../../types";
 import { checkPaymentBin } from "../../utils/api";
 import { Badge, Banner, Button, Card, Field, Mono, Row, Rows, Section } from "../../ui";
 import type { BannerTone } from "../../ui";
-import { subscription } from "../../shared/copy/guides-subscription";
+import { subscription } from "../../shared/copy/ru";
 import { countryName } from "../../shared/lib/country";
 import type { ShowToast } from "../../shared/hooks";
 import { detectBrand } from "./binBrand";

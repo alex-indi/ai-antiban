@@ -1,4 +1,4 @@
-import { VPS_PROVIDERS } from "../../components/GuideViewer";
+import { VPS_PROVIDERS } from "../guides/providers";
 import { connect as copy } from "../../shared/copy/ru";
 
 export interface Hosting {

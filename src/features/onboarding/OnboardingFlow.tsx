@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { ProviderId, RiskReport } from "../../types";
 import { Button, Progress } from "../../ui";
 import { getFocusable, trapTab } from "../../ui/dom";
-import { onboarding as copy } from "../../shared/copy/onboarding";
+import { onboarding as copy } from "../../shared/copy/ru";
 import { ONBOARDING_STEPS } from "./useOnboarding";
 import { StepWelcome } from "./StepWelcome";
 import { StepNetwork } from "./StepNetwork";
