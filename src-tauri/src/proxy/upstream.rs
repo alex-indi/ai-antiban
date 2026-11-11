@@ -16,6 +16,7 @@ use tokio_rustls::rustls::pki_types::ServerName;
 use tokio_rustls::rustls::{ClientConfig, RootCertStore};
 use tokio_rustls::TlsConnector;
 
+use crate::routing::net::resolve_entry_checked;
 use crate::routing::{parse_route_key, Entry, EntryProto, Route};
 use crate::state::UpstreamProxyConfig;
 
@@ -102,10 +103,21 @@ fn authority(host: &str, port: u16) -> String {
     }
 }
 
-async fn tcp_connect(entry: &Entry) -> io::Result<TcpStream> {
-    let stream = TcpStream::connect((entry.host.as_str(), entry.port)).await?;
-    let _ = stream.set_nodelay(true);
-    Ok(stream)
+/// Resolves the entry host once, checks EVERY address (see [`crate::routing::net`]) and connects to
+/// a checked `SocketAddr` — the name is never resolved a second time.
+async fn tcp_connect(entry: &Entry, allow_local: bool, gateway_port: u16) -> io::Result<TcpStream> {
+    let addrs = resolve_entry_checked(entry, allow_local, gateway_port).await?;
+    let mut last_err: Option<io::Error> = None;
+    for addr in addrs {
+        match TcpStream::connect(addr).await {
+            Ok(stream) => {
+                let _ = stream.set_nodelay(true);
+                return Ok(stream);
+            }
+            Err(e) => last_err = Some(e),
+        }
+    }
+    Err(last_err.unwrap_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no entry address")))
 }
 
 async fn socks5_handshake(
@@ -320,23 +332,25 @@ async fn connect_entry_with(
     target_port: u16,
     timeout: Duration,
     tls: &Arc<ClientConfig>,
+    allow_local: bool,
+    gateway_port: u16,
 ) -> io::Result<UpstreamStream> {
     let fut = async {
         match entry.proto {
             EntryProto::Socks5 => {
-                let mut s = tcp_connect(entry).await?;
+                let mut s = tcp_connect(entry, allow_local, gateway_port).await?;
                 socks5_handshake(&mut s, entry, target_host, target_port).await?;
                 Ok(UpstreamStream::Plain(s))
             }
             EntryProto::Http => {
-                let mut s = tcp_connect(entry).await?;
+                let mut s = tcp_connect(entry, allow_local, gateway_port).await?;
                 http_connect_handshake(&mut s, entry, target_host, target_port).await?;
                 Ok(UpstreamStream::Plain(s))
             }
             EntryProto::Https => {
                 let server_name = ServerName::try_from(entry.tls_server_name().to_string())
                     .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid TLS server name"))?;
-                let tcp = tcp_connect(entry).await?;
+                let tcp = tcp_connect(entry, allow_local, gateway_port).await?;
                 let mut tls_stream = TlsConnector::from(Arc::clone(tls))
                     .connect(server_name, tcp)
                     .await
@@ -360,14 +374,26 @@ async fn connect_via_route_with(
     target_port: u16,
     per_entry_timeout: Duration,
     tls: &Arc<ClientConfig>,
+    gateway_port: u16,
 ) -> io::Result<UpstreamStream> {
     if route.entries.is_empty() {
         return Err(io::Error::new(io::ErrorKind::NotFound, "route has no entry nodes"));
     }
     let mut errors = Vec::with_capacity(route.entries.len());
     let mut last_kind = io::ErrorKind::Other;
+    let allow_local = route.allows_local_entries();
     for (i, entry) in route.entries.iter().enumerate() {
-        match connect_entry_with(entry, target_host, target_port, per_entry_timeout, tls).await {
+        match connect_entry_with(
+            entry,
+            target_host,
+            target_port,
+            per_entry_timeout,
+            tls,
+            allow_local,
+            gateway_port,
+        )
+        .await
+        {
             Ok(s) => return Ok(s),
             Err(e) => {
                 last_kind = e.kind();
@@ -387,15 +413,17 @@ async fn connect_via_route_with(
 }
 
 /// Opens a tunnel to `target_host:target_port` through the route's entries, tried in order with
-/// `per_entry_timeout` each. Fails only when every entry failed.
+/// `per_entry_timeout` each. Fails only when every entry failed. `gateway_port` is the port of the
+/// local gateway (0 = unknown): an entry pointing back at it is refused (loop).
 pub async fn connect_via_route(
     route: &Route,
     target_host: &str,
     target_port: u16,
     per_entry_timeout: Duration,
+    gateway_port: u16,
 ) -> io::Result<UpstreamStream> {
     let tls = production_tls_config()?;
-    connect_via_route_with(route, target_host, target_port, per_entry_timeout, &tls).await
+    connect_via_route_with(route, target_host, target_port, per_entry_timeout, &tls, gateway_port).await
 }
 
 /// Legacy entry point: connects through a single v1.3.x upstream config.
@@ -411,7 +439,7 @@ pub async fn connect_via_upstream(
             format!("Unsupported upstream proxy protocol: {}", cfg.protocol),
         )
     })?;
-    connect_via_route(&route, target_host, target_port, timeout).await
+    connect_via_route(&route, target_host, target_port, timeout, 0).await
 }
 
 #[cfg(test)]
@@ -435,8 +463,8 @@ mod tests {
 
     #[test]
     fn test_parse_socks5h_and_unescaped_label() {
-        // Private / loopback entry hosts are rejected since key v2 validation.
-        assert!(parse_upstream_key("socks5h://192.168.1.100:9050#Custom Gateway").is_err());
+        // Link-local / metadata / reserved entry hosts are rejected even for manual URL keys.
+        assert!(parse_upstream_key("socks5h://169.254.169.254:9050#Custom Gateway").is_err());
 
         let input = "socks5h://95.217.1.100:9050#Custom Gateway";
         let cfg = parse_upstream_key(input).expect("parse failed");
@@ -892,7 +920,7 @@ mod tests {
         let ca = make_ca();
         let port = spawn_tls_proxy(&ca, ALICE_AUTH, StubReply::Ok).await;
         let route = route_of(vec![https_entry(port, "wonderland")]);
-        let res = connect_via_route_with(&route, "api.anthropic.com", 443, Duration::from_secs(3), &client_cfg_trusting(&ca)).await;
+        let res = connect_via_route_with(&route, "api.anthropic.com", 443, Duration::from_secs(3), &client_cfg_trusting(&ca), 0).await;
         let mut s = match res {
             Ok(s) => s,
             Err(e) if sandboxed(&e) => return,
@@ -912,7 +940,7 @@ mod tests {
 
         let port = spawn_tls_proxy(&ca, ALICE_AUTH, StubReply::Ok).await;
         let route = route_of(vec![https_entry(port, "WrongSecret77")]);
-        let err = connect_via_route_with(&route, "api.anthropic.com", 443, Duration::from_secs(3), &cfg)
+        let err = connect_via_route_with(&route, "api.anthropic.com", 443, Duration::from_secs(3), &cfg, 0)
             .await
             .err()
             .expect("wrong password must fail");
@@ -921,7 +949,7 @@ mod tests {
 
         let port = spawn_tls_proxy(&ca, ALICE_AUTH, StubReply::AuthRequired).await;
         let route = route_of(vec![https_entry(port, "wonderland")]);
-        let err = connect_via_route_with(&route, "api.anthropic.com", 443, Duration::from_secs(3), &cfg)
+        let err = connect_via_route_with(&route, "api.anthropic.com", 443, Duration::from_secs(3), &cfg, 0)
             .await
             .err()
             .expect("407 must fail");
@@ -929,7 +957,7 @@ mod tests {
 
         let port = spawn_tls_proxy(&ca, ALICE_AUTH, StubReply::Forbidden).await;
         let route = route_of(vec![https_entry(port, "wonderland")]);
-        let err = connect_via_route_with(&route, "api.anthropic.com", 443, Duration::from_secs(3), &cfg)
+        let err = connect_via_route_with(&route, "api.anthropic.com", 443, Duration::from_secs(3), &cfg, 0)
             .await
             .err()
             .expect("403 must fail");
@@ -944,14 +972,14 @@ mod tests {
         let route = route_of(vec![https_entry(port, "wonderland")]);
 
         // Client trusts a different CA.
-        let err = connect_via_route_with(&route, "api.anthropic.com", 443, Duration::from_secs(3), &client_cfg_trusting(&other_ca))
+        let err = connect_via_route_with(&route, "api.anthropic.com", 443, Duration::from_secs(3), &client_cfg_trusting(&other_ca), 0)
             .await
             .err()
             .expect("untrusted cert must fail");
         assert!(err.to_string().contains("TLS handshake failed"), "{err}");
 
         // Production path (public roots only) rejects the private CA as well.
-        let err = connect_via_route(&route, "api.anthropic.com", 443, Duration::from_secs(3))
+        let err = connect_via_route(&route, "api.anthropic.com", 443, Duration::from_secs(3), 0)
             .await
             .err()
             .expect("production roots must reject a private CA");
@@ -960,7 +988,7 @@ mod tests {
         // SNI that the certificate does not cover is rejected too.
         let mut bad_sni = https_entry(port, "wonderland");
         bad_sni.sni = Some("evil.example.com".to_string());
-        let err = connect_via_route_with(&route_of(vec![bad_sni]), "api.anthropic.com", 443, Duration::from_secs(3), &client_cfg_trusting(&ca))
+        let err = connect_via_route_with(&route_of(vec![bad_sni]), "api.anthropic.com", 443, Duration::from_secs(3), &client_cfg_trusting(&ca), 0)
             .await
             .err()
             .expect("name mismatch must fail");
@@ -976,7 +1004,7 @@ mod tests {
             l.local_addr().unwrap().port()
         };
         let route = route_of(vec![https_entry(closed, "wonderland"), https_entry(good, "wonderland")]);
-        let mut s = match connect_via_route_with(&route, "api.anthropic.com", 443, Duration::from_secs(3), &client_cfg_trusting(&ca)).await {
+        let mut s = match connect_via_route_with(&route, "api.anthropic.com", 443, Duration::from_secs(3), &client_cfg_trusting(&ca), 0).await {
             Ok(s) => s,
             Err(e) if sandboxed(&e) => return,
             Err(e) => panic!("failover failed: {e}"),
@@ -988,7 +1016,7 @@ mod tests {
 
         // All entries down -> one aggregated error, no secrets.
         let route = route_of(vec![https_entry(closed, "wonderland"), https_entry(closed, "wonderland")]);
-        let err = connect_via_route_with(&route, "api.anthropic.com", 443, Duration::from_secs(1), &client_cfg_trusting(&ca))
+        let err = connect_via_route_with(&route, "api.anthropic.com", 443, Duration::from_secs(1), &client_cfg_trusting(&ca), 0)
             .await
             .err()
             .expect("all down must fail");

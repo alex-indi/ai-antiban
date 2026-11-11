@@ -160,6 +160,7 @@ fn start_proxy(
         .await
         .expect("Failed to start proxy server");
         let guard = proxy_mgr.guard.clone();
+        guard.restore_manual_killswitch(app_state).await;
         let pac_url = format!("http://{}/proxy.pac", proxy_mgr.server.bound_addr);
         app.manage(proxy_mgr);
         (guard, pac_url)

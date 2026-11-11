@@ -86,10 +86,27 @@ impl Auditor {
         state: &AppState,
         force_refresh: bool,
     ) -> Result<NetworkTelemetry, String> {
-        match state.route_selection(provider.as_str()).await {
+        let selection = state.route_selection(provider.as_str()).await;
+        self.resolve_for_selection(provider, state, &selection, force_refresh).await
+    }
+
+    /// Same as [`Self::resolve_for_provider`] for an already taken route snapshot, so that an
+    /// audit and the tunnel it admits work with the very same route.
+    pub async fn resolve_for_selection(
+        &self,
+        provider: ProviderId,
+        state: &AppState,
+        selection: &RouteSelection,
+        force_refresh: bool,
+    ) -> Result<NetworkTelemetry, String> {
+        match selection {
             RouteSelection::Direct => self.resolver.resolve(force_refresh).await,
             RouteSelection::Missing(id) => Err(format!(
-                "Маршрут {id} для {} не найден: трафик заблокирован",
+                "Маршрут {id} для {} не найден: ключ удалён, трафик заблокирован",
+                provider.display_name()
+            )),
+            RouteSelection::Invalid(why) => Err(format!(
+                "Ключ профиля Claude недействителен ({why}): трафик {} заблокирован",
                 provider.display_name()
             )),
             RouteSelection::Route(route) => {
@@ -97,11 +114,11 @@ impl Auditor {
                     return Err(format!(
                         "Маршрут «{}» недоступен ({}): трафик {} заблокирован",
                         route.label,
-                        reason.message(),
+                        reason.message_ru(),
                         provider.display_name()
                     ));
                 }
-                self.resolve_route(&route, state, force_refresh).await
+                self.resolve_route(route, state, force_refresh).await
             }
         }
     }
@@ -131,8 +148,20 @@ impl Auditor {
         state: &AppState,
         force_refresh_telemetry: bool,
     ) -> Result<RiskReport, String> {
+        let selection = state.route_selection(provider.as_str()).await;
+        self.evaluate_all_with(provider, state, &selection, force_refresh_telemetry).await
+    }
+
+    /// [`Self::evaluate_all`] on an already taken route snapshot (see [`Self::resolve_for_selection`]).
+    pub async fn evaluate_all_with(
+        &self,
+        provider: ProviderId,
+        state: &AppState,
+        selection: &RouteSelection,
+        force_refresh_telemetry: bool,
+    ) -> Result<RiskReport, String> {
         let telemetry = self
-            .resolve_for_provider(provider, state, force_refresh_telemetry)
+            .resolve_for_selection(provider, state, selection, force_refresh_telemetry)
             .await?;
 
         let matrix = self.rules.provider_matrix.read().await;

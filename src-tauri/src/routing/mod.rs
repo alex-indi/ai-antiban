@@ -4,18 +4,20 @@
 //! bound to routes in [`crate::state::AppStateData`]; the gateway resolves the effective route of a
 //! provider with [`select_route_id`]:
 //!
-//! 1. `anthropic` only: the route of the active Claude profile (`profile_route_id`, mirrored from
-//!    the profile's `bound_upstream_key` on switch / bind);
-//! 2. explicit `provider_routes[provider]`;
-//! 3. `default_route_id`;
-//! 4. otherwise direct (through whatever network / VPN the user has).
+//! * `anthropic`: route of the active Claude profile (`profile_route_id`) -> explicit
+//!   `provider_routes[provider]` -> `default_route_id` -> direct;
+//! * every other provider: explicit `provider_routes[provider]` -> `default_route_id` -> route of
+//!   the active Claude profile (fallback, the v1.3.1 semantics) -> direct (through whatever
+//!   network / VPN the user has).
 //!
-//! Once a route is selected it is fail-closed: if it is disabled, expired, missing or unreachable
-//! the connection is refused and never falls back to a direct connection.
+//! Once a route is selected it is fail-closed: if it is disabled, expired, missing, invalid or
+//! unreachable the connection is refused and never falls back to a direct connection.
 
 pub mod key;
+pub mod net;
 
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::net::IpAddr;
 use std::sync::RwLock;
 
@@ -27,6 +29,10 @@ pub use key::parse_route_key;
 
 /// Maximum number of entry nodes in one key.
 pub const MAX_ENTRIES: usize = 8;
+
+/// Pseudo route id selected for the providers that follow the Claude profile while the profile's
+/// key failed validation (see [`RouteSelection::Invalid`]). It never exists in `routes`.
+pub const INVALID_PROFILE_ROUTE_ID: &str = "profile:invalid";
 
 fn default_true() -> bool {
     true
@@ -163,6 +169,8 @@ pub enum RouteDownReason {
     Missing,
     /// Every entry node failed.
     Unreachable,
+    /// The key of the active Claude profile failed validation.
+    Invalid,
 }
 
 impl RouteDownReason {
@@ -173,21 +181,50 @@ impl RouteDownReason {
             RouteDownReason::NoEntries => "no_entries",
             RouteDownReason::Missing => "missing",
             RouteDownReason::Unreachable => "unreachable",
+            RouteDownReason::Invalid => "invalid",
         }
     }
 
+    /// Generic reason for the client of the gateway (never names entry nodes).
     pub fn message(&self) -> &'static str {
         match self {
             RouteDownReason::Disabled => "route is disabled",
             RouteDownReason::Expired => "route key has expired",
             RouteDownReason::NoEntries => "route has no entry nodes",
-            RouteDownReason::Missing => "bound route no longer exists",
-            RouteDownReason::Unreachable => "all entry nodes of the route are unreachable",
+            RouteDownReason::Missing => {
+                "route key was removed: choose another key or allow a direct connection"
+            }
+            RouteDownReason::Unreachable => "the route's entry nodes are unreachable",
+            RouteDownReason::Invalid => "the key of the active Claude profile is not valid",
+        }
+    }
+
+    /// Same reason for the Zastava UI (Russian).
+    pub fn message_ru(&self) -> &'static str {
+        match self {
+            RouteDownReason::Disabled => "маршрут отключён",
+            RouteDownReason::Expired => "срок действия ключа истёк",
+            RouteDownReason::NoEntries => "в маршруте нет входных нод",
+            RouteDownReason::Missing => {
+                "ключ удалён, выберите другой или разрешите прямое соединение"
+            }
+            RouteDownReason::Unreachable => "входные ноды маршрута недоступны",
+            RouteDownReason::Invalid => "ключ активного профиля Claude не прошёл проверку",
         }
     }
 }
 
 impl Route {
+    /// Keys typed by the user in URL form may point to the user's own local proxy; keys that come
+    /// from outside (`zastava://…`) may not. See [`net`].
+    pub fn allows_local_entries(&self) -> bool {
+        !self
+            .raw_key
+            .trim_start()
+            .to_ascii_lowercase()
+            .starts_with(key::ZASTAVA_SCHEME)
+    }
+
     pub fn is_expired_at(&self, now: u64) -> bool {
         self.expires_at.map(|e| e <= now).unwrap_or(false)
     }
@@ -270,17 +307,31 @@ pub fn mask_secret(s: &str) -> String {
     }
 }
 
-/// The route id that should carry `provider` traffic, `None` = direct.
+/// The route id that should carry `provider` traffic, `None` = direct. While the profile key is
+/// invalid, [`INVALID_PROFILE_ROUTE_ID`] is returned wherever the profile route would apply.
 pub fn select_route_id(data: &AppStateData, provider: &str) -> Option<String> {
-    if provider == PROVIDER_ANTHROPIC {
-        if let Some(id) = data.profile_route_id.as_ref() {
+    let profile: Option<String> = if data.profile_route_invalid.is_some() {
+        Some(INVALID_PROFILE_ROUTE_ID.to_string())
+    } else {
+        data.profile_route_id.clone()
+    };
+    let is_claude = provider == PROVIDER_ANTHROPIC;
+    if is_claude {
+        if let Some(id) = profile.as_ref() {
             return Some(id.clone());
         }
     }
     if let Some(id) = data.provider_routes.get(provider) {
         return Some(id.clone());
     }
-    data.default_route_id.clone()
+    if let Some(id) = data.default_route_id.as_ref() {
+        return Some(id.clone());
+    }
+    if !is_claude {
+        // v1.3.1: the active profile's key carried everything that has no other route.
+        return profile;
+    }
+    None
 }
 
 /// Effective routing decision for a provider.
@@ -290,15 +341,52 @@ pub enum RouteSelection {
     Route(Route),
     /// Bound to an id that does not exist (treated as down, never as direct).
     Missing(String),
+    /// The key of the active Claude profile failed validation (treated as down, never as direct).
+    Invalid(String),
 }
 
 pub fn select_route(data: &AppStateData, provider: &str) -> RouteSelection {
     match select_route_id(data, provider) {
         None => RouteSelection::Direct,
+        Some(id) if id == INVALID_PROFILE_ROUTE_ID => RouteSelection::Invalid(
+            data.profile_route_invalid.clone().unwrap_or_default(),
+        ),
         Some(id) => match data.routes.iter().find(|r| r.id == id) {
             Some(r) => RouteSelection::Route(r.clone()),
             None => RouteSelection::Missing(id),
         },
+    }
+}
+
+/// Fingerprint of the nodes (and credentials) of a route: a route re-imported under the same id
+/// with different nodes must not reuse the telemetry cached for the old ones.
+pub fn route_fingerprint(route: &Route) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for e in &route.entries {
+        e.proto.as_str().hash(&mut h);
+        e.host.hash(&mut h);
+        e.port.hash(&mut h);
+        e.username.hash(&mut h);
+        e.password.hash(&mut h);
+        e.sni.hash(&mut h);
+    }
+    h.finish()
+}
+
+/// Display-safe form of a raw key: no credentials, no label (`socks5://host:port`).
+pub fn mask_raw_key(raw: &str) -> String {
+    let t = raw.trim();
+    if t.to_ascii_lowercase().starts_with(key::ZASTAVA_SCHEME) {
+        return "zastava://***".to_string();
+    }
+    let base = t.split('#').next().unwrap_or("");
+    match url::Url::parse(base) {
+        Ok(u) => match (u.host_str(), u.port()) {
+            (Some(h), Some(p)) => format!("{}://{h}:{p}", u.scheme()),
+            (Some(h), None) => format!("{}://{h}", u.scheme()),
+            _ => "***".to_string(),
+        },
+        Err(_) => "***".to_string(),
     }
 }
 
@@ -452,14 +540,58 @@ pub struct RouteView {
     pub health: Option<RouteHealth>,
 }
 
+/// A binding that points to a route which no longer exists. The provider stays blocked
+/// (fail-closed) until the user picks another key or explicitly unbinds it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DanglingBinding {
+    /// `provider` | `default` | `profile`
+    pub kind: String,
+    /// Set for `kind == "provider"`.
+    pub provider: Option<String>,
+    pub route_id: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RoutesSnapshot {
     pub routes: Vec<RouteView>,
     pub provider_routes: HashMap<String, String>,
     pub default_route_id: Option<String>,
     pub profile_route_id: Option<String>,
-    /// Effective route id per known provider after applying priorities (`null` = direct).
+    /// Effective route id per known provider after applying priorities (`null` = direct). A
+    /// provider that is blocked because its key is invalid maps to [`INVALID_PROFILE_ROUTE_ID`].
     pub effective: HashMap<String, Option<String>>,
+    /// Why the active Claude profile's key cannot be used (`null` = fine). Claude is blocked.
+    #[serde(default)]
+    pub profile_route_error: Option<String>,
+    /// Bindings whose route was removed (their providers are blocked, not direct).
+    #[serde(default)]
+    pub dangling: Vec<DanglingBinding>,
+}
+
+fn dangling_bindings(data: &AppStateData) -> Vec<DanglingBinding> {
+    let mut out = Vec::new();
+    let mut providers: Vec<(&String, &String)> = data.provider_routes.iter().collect();
+    providers.sort();
+    for (p, id) in providers {
+        if !data.routes.iter().any(|r| r.id == *id) {
+            out.push(DanglingBinding {
+                kind: "provider".into(),
+                provider: Some(p.clone()),
+                route_id: id.clone(),
+            });
+        }
+    }
+    if let Some(id) = data.default_route_id.as_ref() {
+        if !data.routes.iter().any(|r| r.id == *id) {
+            out.push(DanglingBinding { kind: "default".into(), provider: None, route_id: id.clone() });
+        }
+    }
+    if let Some(id) = data.profile_route_id.as_ref() {
+        if !data.routes.iter().any(|r| r.id == *id) {
+            out.push(DanglingBinding { kind: "profile".into(), provider: None, route_id: id.clone() });
+        }
+    }
+    out
 }
 
 pub fn route_view(
@@ -518,21 +650,32 @@ pub fn snapshot(data: &AppStateData, health: &RouteHealthRegistry, now: u64) -> 
         default_route_id: data.default_route_id.clone(),
         profile_route_id: data.profile_route_id.clone(),
         effective,
+        profile_route_error: data.profile_route_invalid.clone(),
+        dangling: dangling_bindings(data),
     }
 }
 
 /// Applies the `bound_upstream_key` of the active Claude profile: the key becomes a route and the
 /// highest-priority route for `anthropic`. `None` removes the override.
+///
+/// Fail-closed: when the key does not pass validation the previous profile's route is NOT kept
+/// (that would send this account's traffic through another account's IP). The profile route is
+/// marked invalid instead, Claude is blocked with that reason, and the error is returned.
 pub async fn apply_profile_key(
     state: &crate::state::AppState,
     key: Option<&str>,
 ) -> Result<(), String> {
     match key.map(str::trim).filter(|k| !k.is_empty()) {
-        Some(k) => {
-            let route = parse_route_key(k, crate::auditor::network::current_timestamp())?;
-            let id = state.upsert_route(route).await.map_err(|e| e.to_string())?;
-            state.set_profile_route(Some(id)).await.map_err(|e| e.to_string())
-        }
+        Some(k) => match parse_route_key(k, crate::auditor::network::current_timestamp()) {
+            Ok(route) => state.apply_profile_route(route).await.map_err(|e| e.to_string()),
+            Err(msg) => {
+                state
+                    .invalidate_profile_route(msg.clone())
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Err(msg)
+            }
+        },
         None => state.set_profile_route(None).await.map_err(|e| e.to_string()),
     }
 }

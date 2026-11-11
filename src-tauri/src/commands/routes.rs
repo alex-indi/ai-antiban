@@ -33,7 +33,7 @@ async fn snapshot(state: &AppContext) -> RoutesSnapshot {
 /// Providers that just got a fixed exit no longer need blocks left by the network guard
 /// ("until network change"). The manual kill-switch is never lifted here.
 async fn release_routed_blocks(state: &AppContext, guard: &proxy::NetworkGuard) {
-    if guard.is_manual_killswitch() {
+    if guard.is_manual_killswitch() || state.is_manual_killswitch_saved().await {
         return;
     }
     for p in state.routed_providers().await {
@@ -139,7 +139,12 @@ pub async fn test_route(
     id: String,
     state: tauri::State<'_, AppContext>,
     auditor: tauri::State<'_, auditor::Auditor>,
+    guard: tauri::State<'_, std::sync::Arc<proxy::NetworkGuard>>,
 ) -> Result<RouteTestResult, String> {
+    // The manual kill-switch stops everything: a test must not open a tunnel either.
+    if guard.is_manual_killswitch() {
+        return Err("Включён «СТОП СЕТИ»: проверка маршрута отключена, пока блокировка не снята".to_string());
+    }
     let route = state
         .get_route(&id)
         .await
@@ -151,6 +156,7 @@ pub async fn test_route(
         TEST_TARGET_HOST,
         TEST_TARGET_PORT,
         Duration::from_secs(TEST_ENTRY_TIMEOUT_SECS),
+        auditor.resolver.gateway_port(),
     )
     .await;
     let latency_ms = started.elapsed().as_millis() as u64;

@@ -1,12 +1,14 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 
 use crate::auditor::geo_matrix::CheckResult;
-use crate::routing::{route_id_for_raw_key, Entry, EntryProto, Route};
+use crate::routing::net::resolve_entry_checked;
+use crate::routing::{route_fingerprint, route_id_for_raw_key, Entry, EntryProto, Route};
 use crate::state::UpstreamProxyConfig;
 
 pub const CACHE_TTL_SECONDS: u64 = 15;
@@ -56,11 +58,16 @@ pub fn current_timestamp() -> u64 {
 }
 
 /// Builds a `reqwest::Client` that routes all traffic through a legacy single upstream proxy.
+/// The upstream host must be an IP literal here (no name resolution takes place).
 pub fn build_upstream_client(cfg: &UpstreamProxyConfig) -> Result<reqwest::Client, String> {
     let route = Route::from_legacy(cfg, 0)
         .ok_or_else(|| format!("Unsupported upstream proxy protocol: {}", cfg.protocol))?;
     let entry = route.entries.first().ok_or("route has no entries")?;
-    let builder = entry_client_builder(entry, None)?;
+    let ip: IpAddr = entry
+        .host
+        .parse()
+        .map_err(|_| "The legacy upstream client needs an IP address".to_string())?;
+    let builder = entry_client_builder(entry, SocketAddr::new(ip, entry.port))?;
     builder
         .build()
         .map_err(|e| format!("Failed to build proxy reqwest client: {e}"))
@@ -74,26 +81,25 @@ fn url_host(host: &str) -> String {
     }
 }
 
-/// reqwest builder going through `entry`, mirroring the gateway transport:
-/// * `socks5` -> `socks5h://` (names resolved by the node, like the gateway's ATYP=domain);
+/// reqwest builder going through `entry`, mirroring the gateway transport. `addr` is the entry
+/// address that was already resolved and checked: the client connects to it and never resolves the
+/// entry name on its own.
+/// * `socks5` -> `socks5h://` (target names resolved by the node, like the gateway's ATYP=domain);
 /// * `http`   -> `http://` proxy with `Proxy-Authorization: Basic`;
 /// * `https`  -> `https://` proxy: reqwest 0.12 (`rustls-tls`, webpki roots) opens TLS to the proxy
 ///   with full certificate verification and ALPN http/1.1, then sends `CONNECT` with Basic auth.
-///   A custom SNI is expressed as proxy URL host = SNI plus a DNS override to the entry address.
+///   The proxy URL host is the TLS server name and a DNS override pins it to `addr`.
 ///
 /// Credentials never go into error messages.
-fn entry_client_builder(
-    entry: &Entry,
-    sni_override_addr: Option<SocketAddr>,
-) -> Result<reqwest::ClientBuilder, String> {
+fn entry_client_builder(entry: &Entry, addr: SocketAddr) -> Result<reqwest::ClientBuilder, String> {
     let scheme = match entry.proto {
         EntryProto::Socks5 => "socks5h",
         EntryProto::Http => "http",
         EntryProto::Https => "https",
     };
-    let url_name = match (entry.proto, sni_override_addr) {
-        (EntryProto::Https, Some(_)) => entry.tls_server_name().to_string(),
-        _ => url_host(&entry.host),
+    let url_name = match entry.proto {
+        EntryProto::Https => url_host(entry.tls_server_name()),
+        _ => url_host(&addr.ip().to_string()),
     };
     let mut proxy_url = url::Url::parse(&format!("{scheme}://{url_name}:{}", entry.port))
         .map_err(|_| "Invalid entry address for the audit client".to_string())?;
@@ -123,43 +129,41 @@ fn entry_client_builder(
         .pool_max_idle_per_host(0)
         .user_agent("Zastava/1.0")
         .proxy(proxy);
-    if let Some(addr) = sni_override_addr {
-        builder = builder.resolve(entry.tls_server_name(), addr);
+    if entry.proto == EntryProto::Https {
+        let name = entry.tls_server_name();
+        if name.parse::<IpAddr>().is_err() {
+            builder = builder.resolve(name, addr);
+        }
     }
     Ok(builder)
 }
 
-/// For `https` entries whose SNI differs from the host, the address the SNI name must resolve to.
-async fn sni_override_addr(entry: &Entry) -> Result<Option<SocketAddr>, String> {
-    if entry.proto != EntryProto::Https {
-        return Ok(None);
-    }
-    let sni = entry.tls_server_name();
-    if sni.eq_ignore_ascii_case(&entry.host) {
-        return Ok(None);
-    }
-    if let Ok(ip) = entry.host.parse::<IpAddr>() {
-        return Ok(Some(SocketAddr::new(ip, entry.port)));
-    }
-    let mut addrs = tokio::time::timeout(
-        Duration::from_millis(REQUEST_TIMEOUT_MS),
-        tokio::net::lookup_host((entry.host.as_str(), entry.port)),
-    )
-    .await
-    .map_err(|_| format!("DNS lookup timeout for entry {}", entry.endpoint()))?
-    .map_err(|e| format!("DNS lookup failed for entry {}: {e}", entry.endpoint()))?;
-    addrs
-        .next()
-        .map(Some)
-        .ok_or_else(|| format!("Entry {} did not resolve", entry.endpoint()))
-}
-
-/// Audit client going through the given route entry (same entry the gateway uses).
-pub async fn build_entry_client(entry: &Entry) -> Result<reqwest::Client, String> {
-    let addr = sni_override_addr(entry).await?;
+/// Audit client going through the given route entry (same entry the gateway uses). The entry host
+/// is resolved here, every address is checked against the entry policy (see
+/// [`crate::routing::net`]) and the client is pinned to the checked address.
+pub async fn build_entry_client(
+    entry: &Entry,
+    allow_local: bool,
+    gateway_port: u16,
+) -> Result<reqwest::Client, String> {
+    let addr = checked_entry_addr(entry, allow_local, gateway_port).await?;
     entry_client_builder(entry, addr)?
         .build()
         .map_err(|e| format!("Failed to build audit client: {e}"))
+}
+
+async fn checked_entry_addr(
+    entry: &Entry,
+    allow_local: bool,
+    gateway_port: u16,
+) -> Result<SocketAddr, String> {
+    let addrs = resolve_entry_checked(entry, allow_local, gateway_port)
+        .await
+        .map_err(|e| format!("Entry node {} rejected: {e}", entry.endpoint()))?;
+    addrs
+        .first()
+        .copied()
+        .ok_or_else(|| format!("Entry {} did not resolve", entry.endpoint()))
 }
 
 /// Test-only: same as [`build_entry_client`] but trusting an extra root (local TLS stub).
@@ -168,7 +172,7 @@ async fn build_entry_client_with_root(
     entry: &Entry,
     root: reqwest::Certificate,
 ) -> Result<reqwest::Client, String> {
-    let addr = sni_override_addr(entry).await?;
+    let addr = checked_entry_addr(entry, true, 0).await?;
     entry_client_builder(entry, addr)?
         .add_root_certificate(root)
         .build()
@@ -221,11 +225,21 @@ struct FreeIpApiResponse {
 /// Cache key: `None` = direct egress, `Some(route id)` = egress through that route.
 type CacheKey = Option<String>;
 
+/// Cached telemetry plus the fingerprint of the route nodes it was measured through (`None` for
+/// direct egress and for test-injected values).
+#[derive(Clone)]
+struct CachedTelemetry {
+    telemetry: NetworkTelemetry,
+    route_fp: Option<u64>,
+}
+
 #[derive(Clone)]
 pub struct NetworkResolver {
     client: reqwest::Client,
-    cache: Arc<RwLock<HashMap<CacheKey, NetworkTelemetry>>>,
+    cache: Arc<RwLock<HashMap<CacheKey, CachedTelemetry>>>,
     resolve_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Port of the local gateway (0 = unknown), used to refuse entry nodes that point back at it.
+    gateway_port: Arc<AtomicU16>,
 }
 
 impl Default for NetworkResolver {
@@ -249,7 +263,17 @@ impl NetworkResolver {
             client,
             cache: Arc::new(RwLock::new(HashMap::new())),
             resolve_lock: Arc::new(tokio::sync::Mutex::new(())),
+            gateway_port: Arc::new(AtomicU16::new(0)),
         }
+    }
+
+    /// Registers the port of the local gateway (called by the proxy server when it binds).
+    pub fn set_gateway_port(&self, port: u16) {
+        self.gateway_port.store(port, Ordering::SeqCst);
+    }
+
+    pub fn gateway_port(&self) -> u16 {
+        self.gateway_port.load(Ordering::SeqCst)
     }
 
     /// Invalidate all cached telemetry (direct and every route).
@@ -264,12 +288,12 @@ impl NetworkResolver {
 
     /// Pre-populate or override cached direct telemetry (deterministic tests and simulation)
     pub async fn set_cached(&self, telemetry: NetworkTelemetry) {
-        self.cache.write().await.insert(None, telemetry);
+        self.cache.write().await.insert(None, CachedTelemetry { telemetry, route_fp: None });
     }
 
     /// Pre-populate cached telemetry for a route id (`None` = direct).
     pub async fn set_cached_for_route(&self, route_id: Option<String>, telemetry: NetworkTelemetry) {
-        self.cache.write().await.insert(route_id, telemetry);
+        self.cache.write().await.insert(route_id, CachedTelemetry { telemetry, route_fp: None });
     }
 
     /// Legacy: pre-populate cached telemetry for an upstream raw key (mapped to its route id).
@@ -295,9 +319,22 @@ impl NetworkResolver {
         self.resolve_with_route(force_refresh, route.as_ref()).await
     }
 
-    async fn cached(&self, key: &CacheKey, force_refresh: bool, locked: bool) -> Option<NetworkTelemetry> {
+    async fn cached(
+        &self,
+        key: &CacheKey,
+        force_refresh: bool,
+        locked: bool,
+        route_fp: Option<u64>,
+    ) -> Option<NetworkTelemetry> {
         let r = self.cache.read().await;
-        let telemetry = r.get(key)?;
+        let entry = r.get(key)?;
+        // The route was re-imported with different nodes / credentials: the entry is stale.
+        if let (Some(cached_fp), Some(fp)) = (entry.route_fp, route_fp) {
+            if cached_fp != fp {
+                return None;
+            }
+        }
+        let telemetry = &entry.telemetry;
         let ttl = if force_refresh || !telemetry.has_provider_metadata() {
             2
         } else {
@@ -320,9 +357,10 @@ impl NetworkResolver {
         route: Option<&Route>,
     ) -> Result<NetworkTelemetry, String> {
         let key: CacheKey = route.map(|r| r.id.clone());
+        let fp = route.map(route_fingerprint);
 
         if !force_refresh {
-            if let Some(t) = self.cached(&key, false, false).await {
+            if let Some(t) = self.cached(&key, false, false, fp).await {
                 return Ok(t);
             }
         }
@@ -330,7 +368,7 @@ impl NetworkResolver {
         // Coalesce concurrent cold-start / multi-provider probes so we don't fire 4 simultaneous
         // requests to ipwho.is / ipinfo.io and trigger rate limits or timeouts on startup.
         let _guard = self.resolve_lock.lock().await;
-        if let Some(t) = self.cached(&key, force_refresh, true).await {
+        if let Some(t) = self.cached(&key, force_refresh, true, fp).await {
             return Ok(t);
         }
 
@@ -339,7 +377,10 @@ impl NetworkResolver {
             Some(r) => self.cascade_via_route(r).await?,
         };
 
-        self.cache.write().await.insert(key, telemetry.clone());
+        self.cache
+            .write()
+            .await
+            .insert(key, CachedTelemetry { telemetry: telemetry.clone(), route_fp: fp });
         Ok(telemetry)
     }
 
@@ -348,8 +389,10 @@ impl NetworkResolver {
             return Err("route has no entry nodes".to_string());
         }
         let mut errors = Vec::new();
+        let allow_local = route.allows_local_entries();
+        let gateway_port = self.gateway_port();
         for (i, entry) in route.entries.iter().enumerate() {
-            let res = match build_entry_client(entry).await {
+            let res = match build_entry_client(entry, allow_local, gateway_port).await {
                 Ok(client) => self.cascade_query(&client).await,
                 Err(e) => Err(e),
             };
@@ -884,7 +927,7 @@ mod tests {
         assert!(seen.contains("YWxpY2U6d29uZGVybGFuZA=="), "{seen}");
 
         // Without the test root (production path) the private CA is rejected.
-        let prod = build_entry_client(&entry).await.unwrap();
+        let prod = build_entry_client(&entry, true, 0).await.unwrap();
         assert!(prod.get("https://audit.test/").send().await.is_err());
     }
 

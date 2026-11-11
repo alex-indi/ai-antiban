@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tokio::sync::RwLock;
+use tokio::sync::{watch, RwLock};
 
 use crate::routing::{select_route, select_route_id, Route, RouteHealthRegistry, RouteSelection};
 
@@ -14,6 +14,8 @@ pub const PROVIDER_GEMINI: &str = "gemini";
 pub const KNOWN_PROVIDERS: [&str; 3] = [PROVIDER_ANTHROPIC, PROVIDER_OPENAI, PROVIDER_GEMINI];
 pub const MAX_HISTORY_ENTRIES_PER_PROVIDER: usize = 10;
 pub const STATE_FILE_NAME: &str = "state.json";
+/// Copy of the original v1.3.x `state.json`, written once before the v1 -> v2 migration.
+pub const STATE_V1_BACKUP_NAME: &str = "state.v1.bak.json";
 /// `state.json` schema: 0/1 = v1.3.x (single `upstream_proxy`), 2 = routes.
 pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 
@@ -132,7 +134,7 @@ pub enum PopupPosition {
 
 /// Legacy (v1.3.x) single upstream proxy. Since schema v2 this is a read-only mirror of the
 /// legacy/default route, kept for the existing commands, `get_state` and downgrade safety.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UpstreamProxyConfig {
     pub enabled: bool,
     pub raw_key: String,
@@ -144,8 +146,36 @@ pub struct UpstreamProxyConfig {
     pub label: Option<String>,
 }
 
+impl UpstreamProxyConfig {
+    /// Copy without secrets (no password, masked username, display-safe `raw_key`) for command
+    /// results.
+    pub fn without_secrets(&self) -> UpstreamProxyConfig {
+        UpstreamProxyConfig {
+            raw_key: crate::routing::mask_raw_key(&self.raw_key),
+            username: self.username.as_deref().map(crate::routing::mask_secret),
+            password: None,
+            ..self.clone()
+        }
+    }
+}
+
+impl std::fmt::Debug for UpstreamProxyConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UpstreamProxyConfig")
+            .field("enabled", &self.enabled)
+            .field("raw_key", &"***")
+            .field("protocol", &self.protocol)
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("username", &self.username.as_deref().map(crate::routing::mask_secret))
+            .field("password", &self.password.as_ref().map(|_| "***"))
+            .field("label", &self.label)
+            .finish()
+    }
+}
+
 /// Persistent state data structure serialized to `state.json`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AppStateData {
     #[serde(default)]
     pub schema_version: u32,
@@ -188,6 +218,46 @@ pub struct AppStateData {
     /// Route managed by the legacy `*_upstream_proxy` commands.
     #[serde(default)]
     pub legacy_route_id: Option<String>,
+    /// Set while the key of the active Claude profile failed validation: the profile route is then
+    /// "invalid" and Claude is blocked (fail-closed) instead of keeping the previous profile's route.
+    #[serde(default)]
+    pub profile_route_invalid: Option<String>,
+    /// Manual kill-switch ("СТОП СЕТИ"). Restored at launch: a restart must not lift it silently.
+    #[serde(default)]
+    pub manual_killswitch: bool,
+    /// Routes of `state.json` this version does not understand (e.g. a future `proto`). They are
+    /// skipped (their bindings become `Missing`, i.e. blocked) but written back unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped_routes: Vec<serde_json::Value>,
+}
+
+impl std::fmt::Debug for AppStateData {
+    /// Secrets (passwords, raw keys, unknown route payloads) are masked.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AppStateData")
+            .field("schema_version", &self.schema_version)
+            .field("pinned_ip", &self.pinned_ip)
+            .field("strict_pinning_enabled", &self.strict_pinning_enabled)
+            .field("ip_history", &self.ip_history)
+            .field("session_allowed_providers", &self.session_allowed_providers)
+            .field("blocked_providers", &self.blocked_providers)
+            .field("upstream_proxy", &self.upstream_proxy)
+            .field("warmup_started_at", &self.warmup_started_at)
+            .field("synced_ai_timezone", &self.synced_ai_timezone)
+            .field("auto_update_enabled", &self.auto_update_enabled)
+            .field("interception_behavior", &self.interception_behavior)
+            .field("popup_position", &self.popup_position)
+            .field("custom_ai_domains", &self.custom_ai_domains)
+            .field("routes", &self.routes)
+            .field("provider_routes", &self.provider_routes)
+            .field("default_route_id", &self.default_route_id)
+            .field("profile_route_id", &self.profile_route_id)
+            .field("legacy_route_id", &self.legacy_route_id)
+            .field("profile_route_invalid", &self.profile_route_invalid)
+            .field("manual_killswitch", &self.manual_killswitch)
+            .field("skipped_routes", &format_args!("<{} not shown>", self.skipped_routes.len()))
+            .finish()
+    }
 }
 
 impl AppStateData {
@@ -209,7 +279,8 @@ impl AppStateData {
             }
         }
         self.schema_version = self.schema_version.max(CURRENT_SCHEMA_VERSION);
-        self.drop_dangling_route_refs();
+        // Dangling references are deliberately kept: a binding to a missing route is `Missing`
+        // (blocked), never silently "direct".
         self.sync_legacy_mirror();
         *self != before
     }
@@ -218,18 +289,11 @@ impl AppStateData {
         self.routes.iter().any(|r| r.id == id)
     }
 
-    fn drop_dangling_route_refs(&mut self) {
-        let ids: HashSet<String> = self.routes.iter().map(|r| r.id.clone()).collect();
-        self.provider_routes.retain(|_, rid| ids.contains(rid));
-        for slot in [
-            &mut self.default_route_id,
-            &mut self.profile_route_id,
-            &mut self.legacy_route_id,
-        ] {
-            if slot.as_ref().map(|id| !ids.contains(id)).unwrap_or(false) {
-                *slot = None;
-            }
-        }
+    /// True when a provider binding, the default or the profile slot points to `id`.
+    fn is_route_referenced(&self, id: &str) -> bool {
+        self.provider_routes.values().any(|v| v == id)
+            || self.default_route_id.as_deref() == Some(id)
+            || self.profile_route_id.as_deref() == Some(id)
     }
 
     /// Id of the route the legacy commands act on: the legacy slot, else the default route.
@@ -253,6 +317,13 @@ impl AppStateData {
     /// (`list_routes` is the route API). `upstream_proxy` stays as in v1.3.x.
     pub fn redacted_for_ui(&self) -> AppStateData {
         let mut d = self.clone();
+        d.skipped_routes.clear();
+        // `upstream_proxy.password` / `.username` are not read by the interface. `raw_key` is still
+        // passed around by it (AppShell -> BackupTab props), so it is left as in v1.3.x for now.
+        if let Some(u) = d.upstream_proxy.as_mut() {
+            u.password = None;
+            u.username = u.username.as_deref().map(crate::routing::mask_secret);
+        }
         for r in &mut d.routes {
             r.raw_key = String::new();
             for e in &mut r.entries {
@@ -279,23 +350,25 @@ impl AppStateData {
             .collect()
     }
 
+    /// Removes the route itself. Bindings that point to it stay (and become `Missing`, i.e. the
+    /// providers are blocked until the user rebinds or unbinds them); only the legacy slot, which
+    /// is not a routing reference, is cleared.
     fn remove_route_locked(&mut self, id: &str) -> bool {
         let before = self.routes.len();
         self.routes.retain(|r| r.id != id);
         let removed = self.routes.len() != before;
-        self.drop_dangling_route_refs();
+        if self.legacy_route_id.as_deref() == Some(id) {
+            self.legacy_route_id = None;
+        }
         removed
     }
 
     /// Removes the legacy route `id` if nothing else references it.
-    fn gc_legacy_route(&mut self, id: &str) {
-        let referenced = self.provider_routes.values().any(|v| v == id)
-            || self.default_route_id.as_deref() == Some(id)
-            || self.profile_route_id.as_deref() == Some(id)
-            || self.legacy_route_id.as_deref() == Some(id);
-        if !referenced {
-            self.remove_route_locked(id);
+    fn gc_legacy_route(&mut self, id: &str) -> bool {
+        if self.is_route_referenced(id) || self.legacy_route_id.as_deref() == Some(id) {
+            return false;
         }
+        self.remove_route_locked(id)
     }
 }
 
@@ -325,6 +398,9 @@ impl Default for AppStateData {
             default_route_id: None,
             profile_route_id: None,
             legacy_route_id: None,
+            profile_route_invalid: None,
+            manual_killswitch: false,
+            skipped_routes: Vec::new(),
         }
     }
 }
@@ -515,6 +591,9 @@ pub struct AppState {
     save_lock: Arc<tokio::sync::Mutex<()>>,
     stats: Arc<GatewayStatsTracker>,
     route_health: Arc<RouteHealthRegistry>,
+    /// Routing generation: bumped by every change that can alter which route a provider uses (or
+    /// the route itself). Established tunnels watch it and re-check their provider's selection.
+    routing_gen: Arc<watch::Sender<u64>>,
 }
 
 impl AppState {
@@ -526,7 +605,22 @@ impl AppState {
             save_lock: Arc::new(tokio::sync::Mutex::new(())),
             stats: Arc::new(GatewayStatsTracker::new()),
             route_health: Arc::new(RouteHealthRegistry::default()),
+            routing_gen: Arc::new(watch::channel(0u64).0),
         }
+    }
+
+    /// Receiver that fires after every routing-relevant change (see `routing_gen`).
+    pub fn subscribe_routing(&self) -> watch::Receiver<u64> {
+        self.routing_gen.subscribe()
+    }
+
+    /// Current routing generation.
+    pub fn routing_generation(&self) -> u64 {
+        *self.routing_gen.borrow()
+    }
+
+    fn bump_routing(&self) {
+        self.routing_gen.send_modify(|g| *g = g.wrapping_add(1));
     }
 
     /// Runtime (not persisted) health of routes.
@@ -549,24 +643,33 @@ impl AppState {
         Self::new(AppStateData::default(), None)
     }
 
-    /// Loads state from `state.json` at `storage_path`. If file does not exist or is corrupted,
-    /// self-heals by restoring default state and writing a clean file.
+    /// Loads state from `state.json` at `storage_path`. A missing file yields the defaults. A file
+    /// that cannot be read at all is first copied to `state.corrupt-<ts>.json` and then replaced by
+    /// the defaults; a single unrecognised route never resets the rest of the state.
     pub fn load_or_default(storage_path: PathBuf) -> Self {
-        let mut was_corrupted = false;
         let mut needs_save = false;
         let mut data = if storage_path.exists() {
-            match Self::load_from_file_raw(&storage_path) {
+            match Self::read_state_lenient(&storage_path) {
                 Ok(mut loaded) => {
-                    needs_save = loaded.migrate(crate::auditor::network::current_timestamp());
+                    let now = crate::auditor::network::current_timestamp();
+                    if loaded.schema_version < 2 {
+                        Self::backup_v1_state_once(&storage_path);
+                    }
+                    needs_save = loaded.migrate(now);
                     loaded
                 }
                 Err(err) => {
+                    let kept = Self::keep_corrupt_copy(&storage_path);
                     eprintln!(
-                        "Warning: Failed to load state from {}: {}. Self-healing to default state.",
+                        "Warning: Failed to load state from {}: {}. {} Self-healing to default state.",
                         storage_path.display(),
-                        err
+                        err,
+                        match kept {
+                            Some(p) => format!("The original file was kept as {}.", p.display()),
+                            None => "The original file could not be copied.".to_string(),
+                        }
                     );
-                    was_corrupted = true;
+                    needs_save = true;
                     AppStateData::default()
                 }
             }
@@ -577,8 +680,10 @@ impl AppState {
         // Session allowances are ephemeral per app launch and must not carry over across restarts
         data.session_allowed_providers.clear();
 
-        if was_corrupted || needs_save {
-            let _ = Self::save_data_to_file(&data, &storage_path);
+        if needs_save {
+            if let Err(e) = Self::save_data_to_file(&data, &storage_path) {
+                eprintln!("Warning: could not rewrite {}: {e}", storage_path.display());
+            }
         }
 
         Self::new(data, Some(storage_path))
@@ -586,29 +691,100 @@ impl AppState {
 
     /// Loads `AppStateData` from a file path, migrated to the current schema.
     pub fn load_from_file(path: &Path) -> Result<AppStateData, StateError> {
-        let mut data = Self::load_from_file_raw(path)?;
+        let mut data = Self::read_state_lenient(path)?;
         data.migrate(crate::auditor::network::current_timestamp());
         Ok(data)
     }
 
-    fn load_from_file_raw(path: &Path) -> Result<AppStateData, StateError> {
+    /// Reads `state.json`; routes that this version cannot parse are moved to `skipped_routes`
+    /// instead of failing the whole file.
+    fn read_state_lenient(path: &Path) -> Result<AppStateData, StateError> {
         let content = std::fs::read_to_string(path)?;
-        let data: AppStateData = serde_json::from_str(&content)?;
+        let mut value: serde_json::Value = serde_json::from_str(&content)?;
+        let obj = value
+            .as_object_mut()
+            .ok_or_else(|| StateError::PathError("state.json is not a JSON object".to_string()))?;
+        let routes_value = obj.remove("routes");
+        let mut data: AppStateData = serde_json::from_value(value)?;
+
+        let mut candidates: Vec<serde_json::Value> = std::mem::take(&mut data.skipped_routes);
+        match routes_value {
+            None | Some(serde_json::Value::Null) => {}
+            Some(serde_json::Value::Array(items)) => {
+                // Previously skipped routes go last: a newer build may understand them now.
+                candidates = items.into_iter().chain(candidates).collect();
+            }
+            Some(_) => {
+                return Err(StateError::PathError("`routes` is not an array".to_string()));
+            }
+        }
+        for (i, item) in candidates.into_iter().enumerate() {
+            match serde_json::from_value::<Route>(item.clone()) {
+                Ok(r) => {
+                    if !data.routes.iter().any(|x| x.id == r.id) {
+                        data.routes.push(r);
+                    }
+                }
+                Err(_) => {
+                    // The error is not printed: serde may quote values of the key.
+                    eprintln!(
+                        "Warning: route #{i} of state.json is not understood by this version and was skipped"
+                    );
+                    data.skipped_routes.push(item);
+                }
+            }
+        }
         Ok(data)
     }
 
-    /// Saves `AppStateData` atomically to a specified file path (write temp + rename).
+    /// Copies the original v1.3.x file next to it, once.
+    fn backup_v1_state_once(path: &Path) {
+        let backup = path.with_file_name(STATE_V1_BACKUP_NAME);
+        if backup.exists() {
+            return;
+        }
+        if let Err(e) = std::fs::copy(path, &backup) {
+            eprintln!("Warning: could not back up the v1 state file: {e}");
+        }
+    }
+
+    /// Copies an unreadable state file to `state.corrupt-<ts>.json` before it is replaced.
+    fn keep_corrupt_copy(path: &Path) -> Option<PathBuf> {
+        let ts = crate::auditor::network::current_timestamp();
+        let mut dest = path.with_file_name(format!("state.corrupt-{ts}.json"));
+        let mut n = 1;
+        while dest.exists() {
+            dest = path.with_file_name(format!("state.corrupt-{ts}-{n}.json"));
+            n += 1;
+        }
+        std::fs::copy(path, &dest).ok().map(|_| dest)
+    }
+
+    /// Saves `AppStateData` atomically: temp file + fsync + rename (+ fsync of the directory).
     pub fn save_data_to_file(data: &AppStateData, path: &Path) -> Result<(), StateError> {
+        use std::io::Write;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let json = serde_json::to_string_pretty(data)?;
         let tmp_path = path.with_extension(format!("json.tmp.{}", std::process::id()));
-        std::fs::write(&tmp_path, &json)?;
+        {
+            let mut f = std::fs::File::create(&tmp_path)?;
+            f.write_all(json.as_bytes())?;
+            f.sync_all()?;
+        }
         if let Err(e) = std::fs::rename(&tmp_path, path) {
             let _ = std::fs::remove_file(&tmp_path);
             // Fallback to direct write if cross-device or Windows file lock prevents rename
-            std::fs::write(path, json).map_err(|_| StateError::Io(e))?;
+            let mut f = std::fs::File::create(path).map_err(|_| StateError::Io(e))?;
+            f.write_all(json.as_bytes())?;
+            f.sync_all()?;
+        }
+        #[cfg(unix)]
+        if let Some(parent) = path.parent() {
+            if let Ok(dir) = std::fs::File::open(parent) {
+                let _ = dir.sync_all();
+            }
         }
         Ok(())
     }
@@ -702,55 +878,81 @@ impl AppState {
         self.inner.read().await.upstream_proxy.clone()
     }
 
-    /// Legacy single-proxy setter, implemented on top of routes: `Some` upserts the config as the
-    /// legacy route (default route when `enabled`), `None` removes the legacy route.
+    /// Legacy single-proxy setter, implemented on top of routes: `Some` installs the config as the
+    /// legacy route (default route when `enabled`), `None` is the legacy "clear" (see
+    /// [`Self::clear_legacy_route`]).
     pub async fn set_upstream_proxy(
         &self,
         proxy: Option<UpstreamProxyConfig>,
     ) -> Result<(), StateError> {
+        match proxy.as_ref().and_then(|cfg| {
+            Route::from_legacy(cfg, crate::auditor::network::current_timestamp())
+        }) {
+            Some(route) => self.install_legacy_route(route).await,
+            None => self.clear_legacy_route().await,
+        }
+    }
+
+    /// Installs `route` as the legacy route; it becomes the default route when enabled. Only the
+    /// explicit legacy slot is ever replaced, never a route that merely serves as the default; a
+    /// replaced legacy route nothing else uses is dropped, as the single slot used to be.
+    pub async fn install_legacy_route(&self, route: Route) -> Result<(), StateError> {
         {
             let mut w = self.inner.write().await;
-            // Only the explicit legacy slot is ever garbage-collected, never a route that merely
-            // serves as the default.
             let previous = w.legacy_route_id.clone();
-            match proxy.as_ref().and_then(|cfg| {
-                Route::from_legacy(cfg, crate::auditor::network::current_timestamp())
-            }) {
-                Some(route) => {
-                    let id = route.id.clone();
-                    let enabled = route.enabled;
-                    Self::upsert_route_locked(&mut w, route);
-                    w.legacy_route_id = Some(id.clone());
-                    if enabled {
-                        w.default_route_id = Some(id.clone());
-                    } else if w.default_route_id.as_deref() == Some(id.as_str()) {
-                        w.default_route_id = None;
-                    }
-                    if let Some(prev) = previous.filter(|p| *p != id) {
-                        if w.default_route_id.as_deref() == Some(prev.as_str()) {
-                            w.default_route_id = Some(id.clone());
-                        }
-                        w.gc_legacy_route(&prev);
-                    }
+            let id = route.id.clone();
+            let enabled = route.enabled;
+            Self::upsert_route_locked(&mut w, route, false);
+            w.legacy_route_id = Some(id.clone());
+            if enabled {
+                w.default_route_id = Some(id.clone());
+            } else if w.default_route_id.as_deref() == Some(id.as_str()) {
+                w.default_route_id = None;
+            }
+            self.route_health.remove(&id);
+            if let Some(prev) = previous.filter(|p| *p != id) {
+                if w.default_route_id.as_deref() == Some(prev.as_str()) {
+                    w.default_route_id = if enabled { Some(id.clone()) } else { None };
                 }
-                None => {
-                    if let Some(prev) = previous {
-                        w.remove_route_locked(&prev);
-                        self.route_health.remove(&prev);
-                    } else {
-                        // Legacy UI showed the default route: detach it, keep the route itself.
-                        w.default_route_id = None;
-                    }
-                    w.legacy_route_id = None;
+                if w.gc_legacy_route(&prev) {
+                    self.route_health.remove(&prev);
                 }
             }
             w.sync_legacy_mirror();
+            self.bump_routing();
         }
         self.save_async().await
     }
 
-    /// Legacy toggle: enables the legacy route and makes it the default, or disables it and
-    /// detaches it from the default slot (so unbound providers go direct, as in v1.3.x).
+    /// Legacy "clear key": the key stops being the default for unbound providers and its legacy
+    /// route is dropped, but ONLY the legacy role goes away. The profile route and explicit
+    /// provider bindings are never touched; a route they still use is kept as an ordinary route.
+    pub async fn clear_legacy_route(&self) -> Result<(), StateError> {
+        {
+            let mut w = self.inner.write().await;
+            match w.legacy_route_id.take() {
+                Some(prev) => {
+                    if w.default_route_id.as_deref() == Some(prev.as_str()) {
+                        w.default_route_id = None;
+                    }
+                    if w.gc_legacy_route(&prev) {
+                        self.route_health.remove(&prev);
+                    }
+                }
+                None => {
+                    // Legacy UI showed the default route: detach it, keep the route itself.
+                    w.default_route_id = None;
+                }
+            }
+            w.sync_legacy_mirror();
+            self.bump_routing();
+        }
+        self.save_async().await
+    }
+
+    /// Legacy toggle: enables the legacy route and makes it the default, or detaches it from the
+    /// default slot (so unbound providers go direct, as in v1.3.x). Disabling never changes
+    /// anything the profile route or an explicit binding uses.
     pub async fn toggle_legacy_upstream(
         &self,
         enabled: bool,
@@ -760,16 +962,27 @@ impl AppState {
             let Some(id) = w.legacy_target_id().filter(|id| w.has_route(id)) else {
                 return Ok(None);
             };
-            if let Some(r) = w.routes.iter_mut().find(|r| r.id == id) {
-                r.enabled = enabled;
-            }
-            w.legacy_route_id = Some(id.clone());
+            // Used by the profile or an explicit binding: those must not be affected.
+            let shared = w.provider_routes.values().any(|v| *v == id)
+                || w.profile_route_id.as_deref() == Some(id.as_str());
             if enabled {
-                w.default_route_id = Some(id);
-            } else if w.default_route_id.as_deref() == Some(id.as_str()) {
-                w.default_route_id = None;
+                if let Some(r) = w.routes.iter_mut().find(|r| r.id == id) {
+                    r.enabled = true;
+                }
+                w.default_route_id = Some(id.clone());
+            } else {
+                if w.default_route_id.as_deref() == Some(id.as_str()) {
+                    w.default_route_id = None;
+                }
+                if !shared {
+                    if let Some(r) = w.routes.iter_mut().find(|r| r.id == id) {
+                        r.enabled = false;
+                    }
+                }
             }
+            w.legacy_route_id = Some(id);
             w.sync_legacy_mirror();
+            self.bump_routing();
             w.upstream_proxy.clone()
         };
         self.save_async().await?;
@@ -778,9 +991,14 @@ impl AppState {
 
     // --- Routes ---
 
-    fn upsert_route_locked(w: &mut AppStateData, mut route: Route) {
+    /// Inserts or replaces (same id) a route. `preserve_enabled`: a re-import of an existing key
+    /// must not silently re-enable a route the user disabled.
+    fn upsert_route_locked(w: &mut AppStateData, mut route: Route, preserve_enabled: bool) {
         if let Some(existing) = w.routes.iter_mut().find(|r| r.id == route.id) {
             route.added_at = existing.added_at;
+            if preserve_enabled {
+                route.enabled = existing.enabled;
+            }
             *existing = route;
         } else {
             w.routes.push(route);
@@ -795,28 +1013,33 @@ impl AppState {
         self.inner.read().await.routes.iter().find(|r| r.id == id).cloned()
     }
 
-    /// Adds or replaces (same id) a route. No validation here: keys are validated by the parser.
+    /// Adds or replaces (same id) a route; an existing route keeps its `enabled` flag. No
+    /// validation here: keys are validated by the parser.
     pub async fn upsert_route(&self, route: Route) -> Result<String, StateError> {
         let id = route.id.clone();
         {
             let mut w = self.inner.write().await;
-            Self::upsert_route_locked(&mut w, route);
+            Self::upsert_route_locked(&mut w, route, true);
             w.sync_legacy_mirror();
+            self.route_health.remove(&id);
+            self.bump_routing();
         }
-        self.route_health.remove(&id);
         self.save_async().await?;
         Ok(id)
     }
 
-    /// Removes a route and every binding that points to it.
+    /// Removes a route. Bindings that point to it are NOT cleaned up: they become `Missing` and the
+    /// providers stay blocked until the user binds another key or unbinds explicitly
+    /// (`bind_provider_route(provider, null)` / `set_default_route(null)`).
     pub async fn remove_route(&self, id: &str) -> Result<bool, StateError> {
         let removed = {
             let mut w = self.inner.write().await;
             let removed = w.remove_route_locked(id);
             w.sync_legacy_mirror();
+            self.route_health.remove(id);
+            self.bump_routing();
             removed
         };
-        self.route_health.remove(id);
         self.save_async().await?;
         Ok(removed)
     }
@@ -832,6 +1055,7 @@ impl AppState {
                 None => false,
             };
             w.sync_legacy_mirror();
+            self.bump_routing();
             found
         };
         self.save_async().await?;
@@ -857,6 +1081,7 @@ impl AppState {
                     w.provider_routes.remove(provider);
                 }
             }
+            self.bump_routing();
         }
         self.save_async().await
     }
@@ -871,10 +1096,12 @@ impl AppState {
             }
             w.default_route_id = route_id.map(str::to_string);
             w.sync_legacy_mirror();
+            self.bump_routing();
         }
         self.save_async().await
     }
 
+    /// Sets (or with `None` clears) the route of the active Claude profile; clears any "invalid".
     pub async fn set_profile_route(&self, route_id: Option<String>) -> Result<(), StateError> {
         {
             let mut w = self.inner.write().await;
@@ -882,6 +1109,50 @@ impl AppState {
                 return Err(StateError::PathError("unknown route id".to_string()));
             }
             w.profile_route_id = route_id;
+            w.profile_route_invalid = None;
+            self.bump_routing();
+        }
+        self.save_async().await
+    }
+
+    /// Imports the key of the active Claude profile as a route and makes it the profile route, in
+    /// one step (the previous profile's route is never left in place).
+    pub async fn apply_profile_route(&self, route: Route) -> Result<(), StateError> {
+        {
+            let mut w = self.inner.write().await;
+            let id = route.id.clone();
+            Self::upsert_route_locked(&mut w, route, true);
+            w.profile_route_id = Some(id.clone());
+            w.profile_route_invalid = None;
+            w.sync_legacy_mirror();
+            self.route_health.remove(&id);
+            self.bump_routing();
+        }
+        self.save_async().await
+    }
+
+    /// Fail-closed state for a profile whose key does not pass validation: no profile route, and
+    /// Claude is blocked with `reason` until a valid key (or no key) is applied.
+    pub async fn invalidate_profile_route(&self, reason: String) -> Result<(), StateError> {
+        {
+            let mut w = self.inner.write().await;
+            w.profile_route_id = None;
+            w.profile_route_invalid = Some(reason.chars().take(300).collect());
+            self.bump_routing();
+        }
+        self.save_async().await
+    }
+
+    // --- Manual kill-switch persistence ---
+
+    pub async fn is_manual_killswitch_saved(&self) -> bool {
+        self.inner.read().await.manual_killswitch
+    }
+
+    pub async fn set_manual_killswitch_saved(&self, on: bool) -> Result<(), StateError> {
+        {
+            let mut w = self.inner.write().await;
+            w.manual_killswitch = on;
         }
         self.save_async().await
     }
@@ -1631,9 +1902,16 @@ mod tests {
             other => panic!("gemini must stay on its (disabled) route, got {other:?}"),
         }
 
-        // Removing a route drops its bindings.
+        // Removing a route preserves provider bindings (fail-closed dangling route -> RouteSelection::Missing).
         state.remove_route(&id).await.unwrap();
-        assert!(!state.get_data().await.provider_routes.contains_key("gemini"));
+        assert_eq!(
+            state.get_data().await.provider_routes.get("gemini"),
+            Some(&id)
+        );
+        assert_eq!(
+            state.route_selection("gemini").await,
+            RouteSelection::Missing(id.clone())
+        );
 
         // clear_upstream_proxy removes the legacy route.
         state.set_upstream_proxy(None).await.unwrap();

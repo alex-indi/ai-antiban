@@ -6,6 +6,10 @@
 //! * `zastava://<base64 URL>` or a bare URL: `socks5://`, `socks5h://`, `http://`, `https://`
 //!   `[user:pass@]host[:port][#Label]`.
 //!
+//! Address policy: `zastava://` keys (they come from outside) may only point to public hosts. Keys
+//! the user typed in URL form (`socks5://`, `http://`, `https://`) may also point to the user's own
+//! local proxy (loopback / private addresses), except for the gateway itself. See [`super::net`].
+//!
 //! Error messages never contain credentials or the raw key.
 
 use std::net::IpAddr;
@@ -15,9 +19,12 @@ use base64::Engine;
 use serde::Deserialize;
 use url::Url;
 
+use super::net::{is_gateway_loop, is_user_local_ip};
 use super::{route_id_for_raw_key, Entry, EntryProto, Route, MAX_ENTRIES};
 use crate::proxy::server::{is_forbidden_ip, is_internal_hostname};
 
+/// Prefix of keys that come from outside.
+pub const ZASTAVA_SCHEME: &str = "zastava://";
 pub const MAX_KEY_LEN: usize = 16 * 1024;
 pub const MAX_LABEL_LEN: usize = 64;
 pub const MAX_ID_LEN: usize = 64;
@@ -108,12 +115,28 @@ fn validate_domain(h: &str) -> Result<(), String> {
         {
             return Err("Entry host is not a valid domain name".to_string());
         }
+        // `127.1`, `2130706433`, `0x7f.1`: resolvers read these as IPv4 literals, so a text check
+        // for "public host" is meaningless. (The resolved address is verified at connect time too.)
+        if is_numeric_or_hex_label(label) {
+            return Err("Entry host must not contain numeric or hex labels: use a plain domain or a dotted IP".to_string());
+        }
     }
     Ok(())
 }
 
-/// Normalizes and validates an entry host: a public IP literal or a public domain name.
-fn validate_host(raw: &str) -> Result<String, String> {
+fn is_numeric_or_hex_label(label: &str) -> bool {
+    if label.chars().all(|c| c.is_ascii_digit()) {
+        return true;
+    }
+    match label.strip_prefix("0x") {
+        Some(rest) => !rest.is_empty() && rest.chars().all(|c| c.is_ascii_hexdigit()),
+        None => false,
+    }
+}
+
+/// Normalizes and validates an entry host: a public IP literal or a public domain name. With
+/// `allow_local` (user-typed URL key) loopback / private IP literals and `localhost` are accepted.
+fn validate_host(raw: &str, allow_local: bool) -> Result<String, String> {
     let h = raw
         .trim()
         .trim_start_matches('[')
@@ -124,13 +147,19 @@ fn validate_host(raw: &str) -> Result<String, String> {
         return Err("Entry host cannot be empty".to_string());
     }
     if let Ok(ip) = h.parse::<IpAddr>() {
-        if is_forbidden_ip(&ip) {
-            return Err(
+        if is_forbidden_ip(&ip) && !(allow_local && is_user_local_ip(&ip)) {
+            return Err(if allow_local {
+                "Entry host must be a public or local-network IP (link-local, metadata and reserved ranges are rejected)"
+                    .to_string()
+            } else {
                 "Entry host must be a public IP (loopback, private and reserved ranges are rejected)"
-                    .to_string(),
-            );
+                    .to_string()
+            });
         }
         return Ok(ip.to_string());
+    }
+    if allow_local && h == "localhost" {
+        return Ok(h);
     }
     validate_domain(&h)?;
     Ok(h)
@@ -159,10 +188,20 @@ fn build_entry(
     username: Option<String>,
     password: Option<String>,
     sni: Option<String>,
+    allow_local: bool,
 ) -> Result<Entry, String> {
-    let host = validate_host(host)?;
+    let host = validate_host(host, allow_local)?;
     if port == 0 {
         return Err("Entry port cannot be 0".to_string());
+    }
+    // A local proxy is fine, the gateway itself (a loop) is not.
+    let loopback_ip = if host == "localhost" {
+        Some(IpAddr::from([127, 0, 0, 1]))
+    } else {
+        host.parse::<IpAddr>().ok()
+    };
+    if loopback_ip.map(|ip| is_gateway_loop(&ip, port, 0)).unwrap_or(false) {
+        return Err("Entry host:port is the Zastava gateway itself".to_string());
     }
     let username = validate_cred(username, "username", proto)?;
     let password = validate_cred(password, "password", proto)?;
@@ -253,7 +292,7 @@ fn parse_v2(value: serde_json::Value, raw_key: &str, now: u64) -> Result<Route, 
     for (i, e) in key.entry.into_iter().enumerate() {
         let proto = EntryProto::from_scheme(&e.proto)
             .ok_or_else(|| format!("Entry #{}: unsupported proto (expected https, socks5 or http)", i + 1))?;
-        let entry = build_entry(proto, &e.host, e.port, e.username, e.password, e.sni)
+        let entry = build_entry(proto, &e.host, e.port, e.username, e.password, e.sni, false)
             .map_err(|err| format!("Entry #{}: {err}", i + 1))?;
         entries.push(entry);
     }
@@ -297,7 +336,7 @@ fn parse_v1(value: serde_json::Value, raw_key: &str, now: u64) -> Result<Route, 
     let key: KeyV1 = serde_json::from_value(value).map_err(|e| json_error(&e))?;
     let proto = EntryProto::from_scheme(&key.protocol)
         .ok_or_else(|| "Unsupported protocol in key (expected https, socks5 or http)".to_string())?;
-    let entry = build_entry(proto, &key.host, key.port, key.username, key.password, None)?;
+    let entry = build_entry(proto, &key.host, key.port, key.username, key.password, None, false)?;
     single_entry_route(entry, key.label, raw_key, now)
 }
 
@@ -318,14 +357,34 @@ fn parse_json_key(json_str: &str, raw_key: &str, now: u64) -> Result<Route, Stri
     }
 }
 
+/// Percent-decoding as in RFC 3986: `+` stays `+` (this is not `application/x-www-form-urlencoded`).
 fn percent_decode_clean(input: &str) -> String {
-    url::form_urlencoded::parse(format!("v={input}").as_bytes())
-        .next()
-        .map(|(_, v)| v.into_owned())
-        .unwrap_or_else(|| input.to_string())
+    fn hex(b: u8) -> Option<u8> {
+        match b {
+            b'0'..=b'9' => Some(b - b'0'),
+            b'a'..=b'f' => Some(b - b'a' + 10),
+            b'A'..=b'F' => Some(b - b'A' + 10),
+            _ => None,
+        }
+    }
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(h), Some(l)) = (hex(bytes[i + 1]), hex(bytes[i + 2])) {
+                out.push(h * 16 + l);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
-fn parse_proxy_url(url_str: &str, raw_key: &str, now: u64) -> Result<Route, String> {
+fn parse_proxy_url(url_str: &str, raw_key: &str, now: u64, allow_local: bool) -> Result<Route, String> {
     let trimmed = url_str.trim();
     // Support unescaped spaces or Cyrillic text in the fragment (#Label)
     let (url_part, raw_fragment) = match trimmed.split_once('#') {
@@ -351,7 +410,7 @@ fn parse_proxy_url(url_str: &str, raw_key: &str, now: u64) -> Result<Route, Stri
     let password = parsed.password().map(percent_decode_clean);
     let label = raw_fragment.filter(|f| !f.is_empty()).map(percent_decode_clean);
 
-    let entry = build_entry(proto, host, port, username, password, None)?;
+    let entry = build_entry(proto, host, port, username, password, None, allow_local)?;
     single_entry_route(entry, label, raw_key, now)
 }
 
@@ -365,7 +424,7 @@ pub fn parse_route_key(input: &str, now: u64) -> Result<Route, String> {
         return Err("Key is too long".to_string());
     }
 
-    if let Some(rest) = trimmed.strip_prefix("zastava://") {
+    if let Some(rest) = trimmed.strip_prefix(ZASTAVA_SCHEME) {
         let bytes = decode_base64_flexible(rest)
             .map_err(|e| format!("Invalid zastava:// base64 payload: {e}"))?;
         let decoded = String::from_utf8(bytes)
@@ -374,10 +433,12 @@ pub fn parse_route_key(input: &str, now: u64) -> Result<Route, String> {
         if decoded.starts_with('{') {
             parse_json_key(decoded, trimmed, now)
         } else {
-            parse_proxy_url(decoded, trimmed, now)
+            // A URL wrapped into zastava:// still comes from outside: public hosts only.
+            parse_proxy_url(decoded, trimmed, now, false)
         }
     } else {
-        parse_proxy_url(trimmed, trimmed, now)
+        // Typed by the user: the user's own local proxy is allowed.
+        parse_proxy_url(trimmed, trimmed, now, true)
     }
 }
 
@@ -452,7 +513,7 @@ mod tests {
         let err = parse_route_key(&k, 0).unwrap_err();
         assert!(!err.contains("TopSecret42"), "{err}");
 
-        let err = parse_route_key("socks5://user:TopSecret42@10.1.1.1:1080", 0).unwrap_err();
+        let err = parse_route_key("socks5://user:TopSecret42@169.254.169.254:1080", 0).unwrap_err();
         assert!(!err.contains("TopSecret42"), "{err}");
 
         let err = parse_route_key("ftp://user:TopSecret42@1.2.3.4:21", 0).unwrap_err();
@@ -487,11 +548,75 @@ mod tests {
         assert_eq!(r.entries[0].proto, EntryProto::Socks5);
         assert_eq!(r.label, "NL-Fast");
 
-        assert!(parse_route_key("socks5://localhost:1080", 0).is_err());
-        assert!(parse_route_key("socks5://127.0.0.1:1080", 0).is_err());
+        // Internal names / single-label hosts are never accepted.
         assert!(parse_route_key("http://router.local:8080", 0).is_err());
         assert!(parse_route_key("http://intranet:8080", 0).is_err());
         assert!(parse_route_key("socks5://[2a01:4f8::1]:1080", 0).is_ok());
-        assert!(parse_route_key("socks5://[fd00::1]:1080", 0).is_err());
+        // Local addresses are for the user's own URL keys only (see test_local_policy_*).
+        assert!(parse_route_key("socks5://[fd00::1]:1080", 0).is_ok());
+        assert!(parse_route_key("socks5://169.254.169.254:1080", 0).is_err());
+    }
+
+    #[test]
+    fn test_local_policy_manual_url_keys_allow_local_proxy() {
+        for k in [
+            "socks5://127.0.0.1:10808",
+            "socks5://localhost:10808",
+            "http://10.0.0.1:8080",
+            "http://192.168.1.5:3128#Router",
+            "https://172.16.0.9:8443",
+            "socks5://[::1]:10808",
+            "socks5://100.64.1.2:1080",
+        ] {
+            let r = parse_route_key(k, 0).unwrap_or_else(|e| panic!("{k}: {e}"));
+            assert!(r.allows_local_entries(), "{k}");
+        }
+        // The gateway itself is never allowed (loop) ...
+        for k in ["socks5://127.0.0.1:8899", "http://localhost:8900", "socks5://[::1]:8899"] {
+            assert!(parse_route_key(k, 0).is_err(), "{k}");
+        }
+        // ... nor reserved / link-local / unspecified ranges.
+        for k in ["socks5://0.0.0.0:1080", "socks5://169.254.1.1:1080", "socks5://240.0.0.1:1080"] {
+            assert!(parse_route_key(k, 0).is_err(), "{k}");
+        }
+    }
+
+    #[test]
+    fn test_local_policy_zastava_keys_are_public_only() {
+        for h in ["127.0.0.1", "10.0.0.1", "192.168.1.1", "100.64.0.1", "localhost", "::1", "::ffff:10.0.0.1", "64:ff9b::a00:1", "::10.0.0.1"] {
+            let k = zkey(&format!(r#"{{"v":2,"entry":[{{"proto":"socks5","host":"{h}","port":1080}}]}}"#));
+            assert!(parse_route_key(&k, 0).is_err(), "v2 {h}");
+        }
+        let v1 = zkey(r#"{"protocol":"socks5","host":"127.0.0.1","port":1080}"#);
+        assert!(parse_route_key(&v1, 0).is_err());
+        // A URL wrapped into zastava:// is still external.
+        let wrapped = format!("zastava://{}", URL_SAFE_NO_PAD.encode(b"socks5://127.0.0.1:10808"));
+        assert!(parse_route_key(&wrapped, 0).is_err());
+        let ok = zkey(r#"{"v":2,"entry":[{"proto":"socks5","host":"185.1.1.1","port":1080}]}"#);
+        assert!(!parse_route_key(&ok, 0).unwrap().allows_local_entries());
+    }
+
+    #[test]
+    fn test_numeric_and_hex_host_spellings_rejected() {
+        for h in ["127.1", "0x7f.1", "0x7f000001.example.net", "10.1", "2130706433", "1.2.3", "a.0x1f.example.net", "localtest.123"] {
+            let k = zkey(&format!(r#"{{"v":2,"entry":[{{"proto":"socks5","host":"{h}","port":1080}}]}}"#));
+            assert!(parse_route_key(&k, 0).is_err(), "v2 {h}");
+        }
+        // Not even for the user's own URL keys: write the dotted address.
+        for u in ["socks5://127.1:1080", "socks5://0x7f.1:1080", "socks5://2130706433:1080"] {
+            assert!(parse_route_key(u, 0).is_err(), "{u}");
+        }
+        // Ordinary names are untouched.
+        assert!(parse_route_key("socks5://nl-1.node-2.example.net:1080", 0).is_ok());
+    }
+
+    #[test]
+    fn test_plus_in_password_is_not_a_space() {
+        let r = parse_route_key("socks5://user:a+b@185.1.1.1:1080", 0).unwrap();
+        assert_eq!(r.entries[0].password.as_deref(), Some("a+b"));
+        let r = parse_route_key("http://us+er:a%2Bb%20c%zz@185.1.1.1:8080#A+B%20C", 0).unwrap();
+        assert_eq!(r.entries[0].username.as_deref(), Some("us+er"));
+        assert_eq!(r.entries[0].password.as_deref(), Some("a+b c%zz"));
+        assert_eq!(r.label, "A+B C");
     }
 }

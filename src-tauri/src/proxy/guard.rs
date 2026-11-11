@@ -82,6 +82,10 @@ pub struct NetworkGuard {
     tunnel_abort_tx: watch::Sender<u64>,
     /// Manual kill-switch. Unlike the automatic gate it also stops routed providers.
     kill_tx: watch::Sender<bool>,
+    /// Serialises every gate write with the kill flag: while the manual kill-switch is engaged the
+    /// gate can never be anything but `Blocked`, no matter which task (tick, accept, restore,
+    /// popup resolution) races with it.
+    gate_lock: std::sync::Mutex<()>,
     inner: Mutex<Inner>,
     ctx: OnceLock<GuardCtx>,
     client: reqwest::Client,
@@ -190,6 +194,7 @@ impl NetworkGuard {
             gate_tx,
             tunnel_abort_tx,
             kill_tx,
+            gate_lock: std::sync::Mutex::new(()),
             inner: Mutex::new(Inner::default()),
             ctx: OnceLock::new(),
             client,
@@ -245,8 +250,37 @@ impl NetworkGuard {
         false
     }
 
+    /// Sets the gate. While the manual kill-switch is engaged every request is coerced to
+    /// `Blocked`: `Open` (or `Pending`) cannot be set behind the kill-switch's back.
     fn set_gate(&self, gate: Gate) {
-        self.gate_tx.send_replace(gate);
+        let _g = self.gate_lock.lock().unwrap_or_else(|p| p.into_inner());
+        let effective = if *self.kill_tx.borrow() { Gate::Blocked } else { gate };
+        self.gate_tx.send_replace(effective);
+    }
+
+    /// Engages the kill flag and blocks the gate as one step with respect to `set_gate`.
+    fn engage_kill(&self) {
+        let _g = self.gate_lock.lock().unwrap_or_else(|p| p.into_inner());
+        self.kill_tx.send_replace(true);
+        self.gate_tx.send_replace(Gate::Blocked);
+    }
+
+    /// Lifts the kill flag and opens the gate as one step with respect to `set_gate`.
+    fn release_kill(&self) {
+        let _g = self.gate_lock.lock().unwrap_or_else(|p| p.into_inner());
+        self.kill_tx.send_replace(false);
+        self.gate_tx.send_replace(Gate::Open);
+    }
+
+    /// Re-engages a manual kill-switch saved by a previous run (a restart must not lift it).
+    /// Returns whether it is engaged.
+    pub async fn restore_manual_killswitch(&self, state: &AppState) -> bool {
+        if state.is_manual_killswitch_saved().await {
+            self.engage_kill();
+            true
+        } else {
+            false
+        }
     }
 
     pub fn is_gate_blocked(&self) -> bool {
@@ -255,9 +289,11 @@ impl NetworkGuard {
 
     pub async fn set_manual_killswitch(&self, freeze: bool, state: &AppState) -> bool {
         if freeze {
-            self.kill_tx.send_replace(true);
+            self.engage_kill();
             self.abort_active_tunnels();
-            self.set_gate(Gate::Blocked);
+            if let Err(e) = state.set_manual_killswitch_saved(true).await {
+                eprintln!("Warning: could not persist the kill-switch: {e}");
+            }
             let mut inner = self.inner.lock().await;
             if let Some(p) = inner.pending.take() {
                 if let Some(ctx) = self.ctx.get() {
@@ -274,8 +310,10 @@ impl NetworkGuard {
             }
             true
         } else {
-            self.kill_tx.send_replace(false);
-            self.set_gate(Gate::Open);
+            self.release_kill();
+            if let Err(e) = state.set_manual_killswitch_saved(false).await {
+                eprintln!("Warning: could not persist the kill-switch: {e}");
+            }
             let mut inner = self.inner.lock().await;
             if let Some(p) = inner.pending.take() {
                 if let Some(ctx) = self.ctx.get() {
@@ -562,9 +600,12 @@ impl NetworkGuard {
             ctx.hold_queue.remove(&p.id).await;
         }
 
-        // 2. Previous allowances / blocks belonged to the old network.
+        // 2. Previous allowances / blocks belonged to the old network (the manual kill-switch's
+        //    blocks do not).
         let _ = ctx.state.clear_session_allowed_providers().await;
-        let _ = ctx.state.clear_blocked_providers().await;
+        if !self.is_manual_killswitch() {
+            let _ = ctx.state.clear_blocked_providers().await;
+        }
         ctx.auditor.resolver.invalidate_cache().await;
 
         // 3. Full re-audit of the new network.
@@ -751,7 +792,9 @@ impl NetworkGuard {
         }
         inner.handled_ip = None;
         ctx.auditor.resolver.invalidate_cache().await;
-        let _ = ctx.state.clear_blocked_providers().await;
+        if !self.is_manual_killswitch() {
+            let _ = ctx.state.clear_blocked_providers().await;
+        }
         self.set_gate(Gate::Open);
         self.hide_popup(ctx);
         let _ = ctx.app.emit("network://changed", ());

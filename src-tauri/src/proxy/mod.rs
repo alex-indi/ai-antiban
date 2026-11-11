@@ -1,6 +1,7 @@
 pub mod guard;
 pub mod hold_queue;
 pub mod pac;
+pub mod route_watch;
 pub mod server;
 pub mod upstream;
 
