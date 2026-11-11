@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
-import type { AppStateData, ProviderId, RiskReport, RoutesSnapshot } from "../../types";
-import { auditConnection, fetchAppState, getRoutesSnapshot, getSysproxyStatus } from "../../utils/api";
+import type { AppStateData, CoverageSnapshot, ProviderId, RiskReport, RoutesSnapshot } from "../../types";
+import { auditConnection, fetchAppState, getCoverageSnapshot, getRoutesSnapshot, getSysproxyStatus } from "../../utils/api";
 import { toast as t } from "../copy/ru";
 import type { ShowToast } from "./useToasts";
 
@@ -23,6 +23,19 @@ export function useGatewayState({ showToast, refreshGatewayStats }: Options) {
   /** Текст последней ошибки аудита; сбрасывается при успешном проходе. Нужен экрану «нет сети». */
   const [auditError, setAuditError] = useState<string | null>(null);
   const [routesSnapshot, setRoutesSnapshot] = useState<RoutesSnapshot | null>(null);
+  const [coverageSnapshot, setCoverageSnapshot] = useState<CoverageSnapshot | null>(null);
+
+  /** Получить актуальный снимок покрытия приложений и цепочки PAC. */
+  const refreshCoverage = useCallback(async () => {
+    try {
+      const snap = await getCoverageSnapshot();
+      setCoverageSnapshot(snap);
+      return snap;
+    } catch (err) {
+      console.warn("Could not fetch coverage snapshot:", err);
+      return null;
+    }
+  }, []);
 
   /** Получить актуальный снимок маршрутов. */
   const refreshRoutes = useCallback(async () => {
@@ -36,12 +49,12 @@ export function useGatewayState({ showToast, refreshGatewayStats }: Options) {
     }
   }, []);
 
-  /** Перечитать AppStateData и маршруты без аудита (тихо: ошибки только в консоль). */
+  /** Перечитать AppStateData, маршруты и покрытие без аудита (тихо: ошибки только в консоль). */
   const refreshState = useCallback(async () => {
-    const [st] = await Promise.all([fetchAppState(), refreshRoutes()]);
+    const [st] = await Promise.all([fetchAppState(), refreshRoutes(), refreshCoverage()]);
     setState(st);
     return st;
-  }, [refreshRoutes]);
+  }, [refreshRoutes, refreshCoverage]);
 
   const runFullAudit = useCallback(
     async (force: boolean = false, silentError: boolean = false) => {
@@ -70,6 +83,12 @@ export function useGatewayState({ showToast, refreshGatewayStats }: Options) {
           await refreshRoutes();
         } catch (routesErr) {
           console.warn("Could not fetch routes snapshot:", routesErr);
+        }
+
+        try {
+          await refreshCoverage();
+        } catch (covErr) {
+          console.warn("Could not fetch coverage snapshot:", covErr);
         }
 
         let claudeReport: RiskReport;
@@ -158,6 +177,15 @@ export function useGatewayState({ showToast, refreshGatewayStats }: Options) {
     activeReport?.telemetry?.org,
   ]);
 
+  // Регулярный опрос покрытия приложений и PAC
+  useEffect(() => {
+    refreshCoverage();
+    const timer = setInterval(() => {
+      refreshCoverage();
+    }, 4000);
+    return () => clearInterval(timer);
+  }, [refreshCoverage]);
+
   const currentIp = activeReport?.telemetry.ip || "--";
   const currentCountry = activeReport?.telemetry.country_code || "--";
   const trustScore = activeReport?.trust_score ?? 100;
@@ -182,6 +210,9 @@ export function useGatewayState({ showToast, refreshGatewayStats }: Options) {
     refreshRoutes,
     refreshState,
     runFullAudit,
+    coverageSnapshot,
+    setCoverageSnapshot,
+    refreshCoverage,
   };
 }
 

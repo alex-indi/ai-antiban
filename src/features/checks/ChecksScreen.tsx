@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { AppStateData, RiskReport } from "../../types";
+import type { AppStateData, CoverageSnapshot, RiskReport } from "../../types";
 import { Badge, Button, Card, ExpandRow, Link, Mono, Row, Rows, Section, Skeleton } from "../../ui";
 import type { IconName, Tone } from "../../ui";
 import { status as words } from "../../shared/copy/ru";
@@ -12,6 +12,7 @@ import "./checks.css";
 export interface ChecksScreenProps {
   report: RiskReport | null;
   state: AppStateData | null;
+  coverageSnapshot?: CoverageSnapshot | null;
   onNavigateToGuide: (guideId?: string) => void;
   onSimulate: () => void;
   onPinCurrentIp: (ip: string) => void;
@@ -61,6 +62,7 @@ function statusOf(item: CheckItem, state: AppStateData | null): StatusView {
 export function ChecksScreen({
   report,
   state,
+  coverageSnapshot,
   onNavigateToGuide,
   onSimulate,
   onPinCurrentIp,
@@ -144,6 +146,54 @@ export function ChecksScreen({
           </Card>
         </Section>
       ))}
+
+      {coverageSnapshot && (
+        <Section title="Покрытие и цепочка PAC">
+          <Card>
+            <Rows>
+              {coverageSnapshot.chained_proxy && (
+                <Row
+                  icon="pulse"
+                  title={`Цепочка PAC: не-ИИ трафик идёт через ${coverageSnapshot.chained_proxy}`}
+                  sub="Маршрутизация обычного веб-трафика через внешний прокси"
+                  trail={<Badge tone="info">Внешний прокси</Badge>}
+                />
+              )}
+              {coverageSnapshot.apps.map((item) => {
+                const icon: IconName =
+                  item.category === "browser"
+                    ? "globe"
+                    : item.category === "desktop"
+                    ? "shield"
+                    : "term";
+
+                let badge = <Badge tone="warn">Не настроено</Badge>;
+                if (!item.installed && item.requests_seen === 0) {
+                  badge = <Badge tone="neutral">Не установлено</Badge>;
+                } else if (item.status === "verified") {
+                  badge = (
+                    <Badge tone="ok" icon="check">
+                      Проверено ({item.requests_seen})
+                    </Badge>
+                  );
+                } else if (item.status === "configured") {
+                  badge = <Badge tone="ok">Настроено</Badge>;
+                }
+
+                return (
+                  <Row
+                    key={item.id}
+                    icon={icon}
+                    title={item.name}
+                    sub={item.detail}
+                    trail={badge}
+                  />
+                );
+              })}
+            </Rows>
+          </Card>
+        </Section>
+      )}
 
       <Section title={copy.tests.title}>
         <Card>

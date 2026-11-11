@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import type { AppStateData, GatewayStatsSnapshot, ProviderId, RiskReport, UpdateCheckResult } from "../../types";
+import type { AppStateData, CoverageSnapshot, GatewayStatsSnapshot, ProviderId, RiskReport, UpdateCheckResult } from "../../types";
 import {
   Badge,
   Banner,
@@ -16,7 +16,7 @@ import {
   StatusHero,
   Switch,
 } from "../../ui";
-import type { MenuEntry } from "../../ui";
+import type { IconName, MenuEntry } from "../../ui";
 import { overview as copy, providers as providerCopy, status as words } from "../../shared/copy/ru";
 import { countryName } from "../../shared/lib/country";
 import { formatNumber } from "../../shared/lib/format";
@@ -33,6 +33,7 @@ export interface OverviewScreenProps {
   trustScore: number;
   gatewayStats: GatewayStatsSnapshot | null;
   updateInfo: UpdateCheckResult | null;
+  coverageSnapshot?: CoverageSnapshot | null;
 
   sysproxyActive: boolean;
   cliProtected: boolean;
@@ -67,6 +68,7 @@ export function OverviewScreen(props: OverviewScreenProps) {
     trustScore,
     gatewayStats,
     updateInfo,
+    coverageSnapshot,
     sysproxyActive,
     cliProtected,
     killswitchFrozen,
@@ -171,6 +173,53 @@ export function OverviewScreen(props: OverviewScreenProps) {
           </Rows>
         </Card>
       </Section>
+
+      {coverageSnapshot && (
+        <Section title="Покрытие приложений">
+          <Card>
+            <Rows>
+              {coverageSnapshot.chained_proxy && (
+                <Row
+                  icon="pulse"
+                  title={`Цепочка PAC: не-ИИ трафик идёт через ${coverageSnapshot.chained_proxy}`}
+                  sub="Маршрутизация обычного веб-трафика через внешний прокси"
+                  trail={<Badge tone="info">Внешний прокси</Badge>}
+                />
+              )}
+              {coverageSnapshot.apps
+                .filter((item) => item.installed || item.requests_seen > 0)
+                .map((item) => {
+                  const icon: IconName =
+                    item.category === "browser"
+                      ? "globe"
+                      : item.category === "desktop"
+                      ? "shield"
+                      : "term";
+
+                  return (
+                    <Row
+                      key={item.id}
+                      icon={icon}
+                      title={item.name}
+                      sub={item.detail}
+                      trail={
+                        item.status === "verified" ? (
+                          <Badge tone="ok" icon="check">
+                            Проверено ({item.requests_seen})
+                          </Badge>
+                        ) : item.status === "configured" ? (
+                          <Badge tone="ok">Настроено</Badge>
+                        ) : (
+                          <Badge tone="warn">Не настроено</Badge>
+                        )
+                      }
+                    />
+                  );
+                })}
+            </Rows>
+          </Card>
+        </Section>
+      )}
 
       <Section title={copy.sectionToday}>
         <Stats>

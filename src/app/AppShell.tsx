@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { isTauri } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { AppHeader, Banner, Button, Mono, TabPanel, Tabs, Toast, ToastViewport } from "../ui";
 import type { MenuEntry, TabItem } from "../ui";
 import { shell as copy, tabs as tabCopy } from "../shared/copy/ru";
@@ -20,6 +21,7 @@ import {
 } from "../shared/hooks";
 import type { TabId } from "../shared/hooks";
 import { openTelegramSupport } from "../utils/opener";
+import { takePendingDeepLink, upsertRoute } from "../utils/api";
 import { OverviewScreen } from "../features/overview/OverviewScreen";
 import { ConnectScreen } from "../features/connect/ConnectScreen";
 import { AlertOverlay } from "../features/alert";
@@ -31,6 +33,7 @@ import { GuidesScreen } from "../features/guides";
 import { SettingsModal } from "../features/settings";
 import { SubscriptionScreen } from "../features/subscription";
 import { AboutModal } from "./AboutModal";
+import { DeepLinkModal } from "./DeepLinkModal";
 import { EventsModal } from "./EventsModal";
 import { TimezoneModal } from "./TimezoneModal";
 import { UpdateModal } from "./UpdateModal";
@@ -58,6 +61,8 @@ export function AppShell() {
   const [aboutOpen, setAboutOpen] = useState(false);
   const [eventsOpen, setEventsOpen] = useState(false);
   const [browserSimulation, setBrowserSimulation] = useState(false);
+  const [pendingDeepLinkKey, setPendingDeepLinkKey] = useState<string | null>(null);
+  const [submittingDeepLink, setSubmittingDeepLink] = useState(false);
 
   // ---- Состояние и действия, вынесенные из старого Dashboard ----
   const stats = useGatewayStats(nav.tab === "overview" && !nav.subscriptionOpen);
@@ -115,6 +120,71 @@ export function AppShell() {
 
   // В Tauri версию отдаёт бэкенд; в браузере его ответ — мок, поэтому берём package.json.
   const version = (isTauri() && updater.updateInfo?.current_version) || APP_VERSION;
+
+  useEffect(() => {
+    takePendingDeepLink()
+      .then((key) => {
+        if (key) setPendingDeepLinkKey(key);
+      })
+      .catch((err) => {
+        console.warn("Could not check pending deep link:", err);
+      });
+
+    let unlisten: (() => void) | undefined;
+    if (isTauri()) {
+      listen<string>("zastava://deep-link", (event) => {
+        if (event.payload) {
+          setPendingDeepLinkKey(event.payload);
+        }
+      })
+        .then((fn) => {
+          unlisten = fn;
+        })
+        .catch((err) => {
+          console.warn("Failed to listen for deep link events:", err);
+        });
+    }
+
+    const onHashChange = () => {
+      takePendingDeepLink()
+        .then((key) => {
+          if (key) setPendingDeepLinkKey(key);
+        })
+        .catch(() => {});
+    };
+    if (typeof window !== "undefined") {
+      window.addEventListener("hashchange", onHashChange);
+    }
+
+    return () => {
+      unlisten?.();
+      if (typeof window !== "undefined") {
+        window.removeEventListener("hashchange", onHashChange);
+      }
+    };
+  }, []);
+
+  const handleConfirmDeepLink = async () => {
+    if (!pendingDeepLinkKey) return;
+    const key = pendingDeepLinkKey;
+    setSubmittingDeepLink(true);
+    try {
+      await upsertRoute(key, null, true);
+      nav.goTab("connect");
+      await gw.refreshRoutes();
+      showToast("Ключ подключён", "Маршрут Заставы успешно добавлен и назначен основным", "success");
+      setPendingDeepLinkKey(null);
+    } catch (err: any) {
+      console.error("Failed to add deep-link route:", err);
+      showToast("Ошибка подключения ключа", err?.message || String(err), "error");
+    } finally {
+      setSubmittingDeepLink(false);
+    }
+  };
+
+  const handleCancelDeepLink = () => {
+    setPendingDeepLinkKey(null);
+  };
 
   const handleOpenSupport = async () => {
     showToast(copy.toast.supportTitle, copy.toast.supportText, "info");
@@ -261,6 +331,7 @@ export function AppShell() {
                 trustScore={gw.trustScore}
                 gatewayStats={stats.gatewayStats}
                 updateInfo={updater.updateInfo}
+                coverageSnapshot={gw.coverageSnapshot}
                 sysproxyActive={gw.sysproxyActive}
                 cliProtected={toggles.cliProtected}
                 killswitchFrozen={toggles.killswitchFrozen}
@@ -299,6 +370,7 @@ export function AppShell() {
               <ChecksScreen
                 report={gw.activeReport}
                 state={gw.state}
+                coverageSnapshot={gw.coverageSnapshot}
                 onNavigateToGuide={nav.openGuide}
                 onSimulate={intercept.handleSimulate}
                 onPinCurrentIp={pinning.handlePinIp}
@@ -382,6 +454,12 @@ export function AppShell() {
       />
       <AboutModal open={aboutOpen} onClose={() => setAboutOpen(false)} version={version} onSupport={handleOpenSupport} />
       <EventsModal open={eventsOpen} onClose={() => setEventsOpen(false)} stats={stats.gatewayStats} />
+      <DeepLinkModal
+        deepLinkKey={pendingDeepLinkKey}
+        onClose={handleCancelDeepLink}
+        onConfirm={handleConfirmDeepLink}
+        submitting={submittingDeepLink}
+      />
 
       {/* Знакомство с Заставой: первый запуск новой версии или «Ещё» → «Пройти знакомство заново» */}
       {onboarding.open && (

@@ -8,6 +8,7 @@ import {
   ClaudeProfile,
   ClaudeProfileListResponse,
   CliProtectionReport,
+  CoverageSnapshot,
   CrashTestStepResult,
   GatewayStatsSnapshot,
   InstallUpdateResult,
@@ -1126,3 +1127,100 @@ export async function testRoute(rawOrId: string): Promise<RouteTestResult> {
     error: null,
   };
 }
+
+// ---- Покрытие приложений и Deep-link ----
+
+let mockPendingDeepLink: string | null = null;
+
+export function setMockPendingDeepLink(link: string | null): void {
+  mockPendingDeepLink = link;
+}
+
+export async function getCoverageSnapshot(): Promise<CoverageSnapshot> {
+  if (isTauri()) {
+    return await invoke<CoverageSnapshot>("get_coverage_snapshot");
+  }
+
+  return {
+    sysproxy_enabled: mockSysproxyActive,
+    cli_protection_enabled: true,
+    chained_proxy: null,
+    apps: [
+      {
+        id: "chrome_arc",
+        name: "Chrome / Arc",
+        category: "browser",
+        installed: true,
+        status: "verified",
+        requests_seen: 42,
+        detail: "PAC-скрипт активен, трафик защищён",
+      },
+      {
+        id: "claude_desktop",
+        name: "Claude Desktop",
+        category: "desktop",
+        installed: true,
+        status: "verified",
+        requests_seen: 18,
+        detail: "Прямой шлюз 127.0.0.1:40111, сессия изолирована",
+      },
+      {
+        id: "chatgpt_desktop",
+        name: "ChatGPT Desktop",
+        category: "desktop",
+        installed: true,
+        status: "configured",
+        requests_seen: 0,
+        detail: "Шлюз настроен через системный PAC",
+      },
+      {
+        id: "antigravity",
+        name: "Antigravity",
+        category: "ide",
+        installed: true,
+        status: "verified",
+        requests_seen: 9,
+        detail: "Интеграция с локальным шлюзом активна",
+      },
+      {
+        id: "cursor",
+        name: "Cursor",
+        category: "ide",
+        installed: true,
+        status: "verified",
+        requests_seen: 27,
+        detail: "HTTP_PROXY настроен в среде редактора",
+      },
+      {
+        id: "claude_code",
+        name: "Claude Code",
+        category: "cli",
+        installed: true,
+        status: "configured",
+        requests_seen: 5,
+        detail: "Переменные окружения экспортированы в shell",
+      },
+    ],
+  };
+}
+
+export async function takePendingDeepLink(): Promise<string | null> {
+  if (isTauri()) {
+    return await invoke<string | null>("take_pending_deep_link");
+  }
+
+  if (typeof window !== "undefined" && window.location.hash.startsWith("#zastava://")) {
+    const link = decodeURIComponent(window.location.hash.slice(1));
+    try {
+      history.replaceState(null, "", window.location.pathname + window.location.search);
+    } catch {
+      window.location.hash = "";
+    }
+    return link;
+  }
+
+  const pending = mockPendingDeepLink;
+  mockPendingDeepLink = null;
+  return pending;
+}
+

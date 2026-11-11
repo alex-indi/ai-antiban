@@ -326,3 +326,26 @@ export interface RouteTestResult {
   exit_ip_matches?: boolean | null;
   error?: string | null;
 }
+
+// ---- Подсистема покрытия приложений и цепочки PAC ----
+
+export type AppCoverageCategory = "browser" | "desktop" | "ide" | "cli";
+export type AppCoverageStatus = "verified" | "configured" | "unconfigured";
+
+export interface AppCoverageItem {
+  id: string;
+  name: string;
+  category: AppCoverageCategory;
+  installed: boolean;
+  status: AppCoverageStatus;
+  requests_seen: number;
+  detail: string;
+}
+
+export interface CoverageSnapshot {
+  sysproxy_enabled: boolean;
+  cli_protection_enabled: boolean;
+  chained_proxy?: string | null;
+  apps: AppCoverageItem[];
+}
+
