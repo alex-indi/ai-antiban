@@ -8,6 +8,23 @@ use tauri::{Emitter, Manager};
 
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            let mut found_deep_link = false;
+            for arg in &argv {
+                if arg.starts_with("zastava://") {
+                    commands::deeplink::handle_deep_link(app, arg);
+                    found_deep_link = true;
+                }
+            }
+            if !found_deep_link {
+                if let Some(win) = app.get_webview_window("main") {
+                    let _ = win.show();
+                    let _ = win.unminimize();
+                    let _ = win.set_focus();
+                }
+            }
+        }))
+        .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             // Register panic guard and OS termination signal watcher for systemic proxy clean-up
@@ -36,6 +53,28 @@ pub fn run() {
 
             spawn_tray_status_watcher(app, &risk_auditor, &app_state, guard_for_watcher);
             spawn_update_checker(app, &app_state);
+
+            #[cfg(any(target_os = "windows", target_os = "linux"))]
+            {
+                use tauri_plugin_deep_link::DeepLinkExt;
+                let _ = app.deep_link().register_all();
+            }
+
+            {
+                use tauri_plugin_deep_link::DeepLinkExt;
+                let dl_handle = app.handle().clone();
+                app.deep_link().on_open_url(move |event| {
+                    for url in event.urls() {
+                        commands::deeplink::handle_deep_link(&dl_handle, url.as_str());
+                    }
+                });
+            }
+
+            for arg in std::env::args() {
+                if arg.starts_with("zastava://") {
+                    commands::deeplink::handle_deep_link(&app.handle(), &arg);
+                }
+            }
 
             Ok(())
         })
@@ -101,14 +140,22 @@ pub fn run() {
             commands::audit::get_gateway_stats,
             commands::sysproxy::force_clean_os_proxy_cmd,
             commands::interception::toggle_network_killswitch_cmd,
-            commands::interception::get_network_killswitch_status_cmd
+            commands::interception::get_network_killswitch_status_cmd,
+            commands::coverage::get_coverage_snapshot,
+            commands::deeplink::take_pending_deep_link
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(|_app_handle, event| {
-            if let tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit = event {
+        .run(|app_handle, event| match event {
+            tauri::RunEvent::Opened { urls } => {
+                for url in urls {
+                    commands::deeplink::handle_deep_link(app_handle, url.as_str());
+                }
+            }
+            tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit => {
                 sysproxy::disable_all_sysproxy();
             }
+            _ => {}
         });
 }
 

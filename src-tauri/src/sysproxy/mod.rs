@@ -28,7 +28,10 @@ pub use cli_protection::{
     disable_cli_and_ide_runtime_settings, disable_cli_protection, enable_cli_and_ide_protection,
     enable_cli_and_ide_protection_with_tz, is_cli_protection_enabled,
 };
-pub use ide::{apply_ide_settings_file, apply_ide_settings_file_with_tz, cleanup_ide_settings_file, sanitize_jsonc};
+pub use ide::{
+    apply_ide_settings_file, apply_ide_settings_file_with_tz, candidate_ide_settings_paths,
+    cleanup_ide_settings_file, sanitize_jsonc,
+};
 pub use shell_rc::{
     build_powershell_guard_block_with_tz, build_shell_rc_guard_block,
     build_shell_rc_guard_block_with_tz, get_windows_powershell_profile_paths, remove_shell_rc_block,

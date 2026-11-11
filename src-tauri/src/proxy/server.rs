@@ -65,6 +65,7 @@ pub struct ProxyServer {
     state: AppState,
     pub hold_queue: Arc<HoldQueue>,
     pub guard: Arc<NetworkGuard>,
+    pub coverage: Arc<crate::proxy::CoverageTracker>,
     app_handle: Option<tauri::AppHandle>,
     pub upstream_redirect: Option<SocketAddr>,
     conn_limiter: Arc<Semaphore>,
@@ -98,6 +99,7 @@ impl ProxyServer {
             state,
             hold_queue,
             guard: Arc::new(NetworkGuard::new()),
+            coverage: Arc::new(crate::proxy::CoverageTracker::new()),
             app_handle,
             upstream_redirect: None,
             conn_limiter: Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTIONS)),
@@ -124,6 +126,7 @@ impl ProxyServer {
             state,
             hold_queue,
             guard: Arc::new(NetworkGuard::new()),
+            coverage: Arc::new(crate::proxy::CoverageTracker::new()),
             app_handle: None,
             upstream_redirect,
             conn_limiter: Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTIONS)),
@@ -168,7 +171,7 @@ impl ProxyServer {
     async fn handle_connection(
         &self,
         mut client: TcpStream,
-        _client_addr: SocketAddr,
+        client_addr: SocketAddr,
     ) -> Result<(), std::io::Error> {
         let mut buffer = [0u8; 4096];
         let bytes_read = match tokio::time::timeout(
@@ -190,6 +193,12 @@ impl ProxyServer {
             Some(l) => l,
             None => return Ok(()),
         };
+
+        let user_agent = lines
+            .find(|line| line.to_ascii_lowercase().starts_with("user-agent:"))
+            .and_then(|line| line.split_once(':').map(|(_, v)| v.trim().to_string()));
+
+        self.coverage.record_incoming(client_addr.port(), user_agent);
 
         let mut parts = request_line.split_whitespace();
         let method = parts.next().unwrap_or("");

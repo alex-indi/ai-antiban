@@ -235,7 +235,7 @@ pub fn cleanup_ide_settings_file(settings_path: &Path) -> Result<bool, String> {
     Ok(changed)
 }
 
-pub(super) fn candidate_ide_settings_paths() -> Vec<(&'static str, PathBuf)> {
+pub fn candidate_ide_settings_paths() -> Vec<(&'static str, PathBuf)> {
     let mut result = Vec::new();
     let ides = [
         ("VS Code", "Code"),

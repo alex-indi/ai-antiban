@@ -12,7 +12,9 @@ pub mod tray;
 pub mod updater;
 
 // Backward-compatible re-exports: these used to live in the crate root.
+pub use commands::coverage::get_coverage_snapshot;
 pub use commands::crash_test::CrashTestStepResult;
+pub use commands::deeplink::take_pending_deep_link;
 pub use commands::AppContext;
 pub use popup::show_and_position_alert_popup;
 pub use sanctions::is_sanctioned_or_blocked_country;

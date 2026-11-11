@@ -2,7 +2,9 @@
 
 pub mod audit;
 pub mod claude;
+pub mod coverage;
 pub mod crash_test;
+pub mod deeplink;
 pub mod domains;
 pub mod interception;
 pub mod payment;
