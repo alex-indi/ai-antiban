@@ -2,10 +2,51 @@
 //! WinINet refresh notification, and `HKCU\Environment` helpers.
 //! Compiled only on `target_os = "windows"` (see `sysproxy/mod.rs`).
 
-use super::{enable_sysproxy, silent_command, LAST_PAC_URL};
+use super::{
+    enable_sysproxy, get_chained_proxy, parse_gateway_port_from_pac_url, parse_reg_dword,
+    parse_reg_sz, parse_windows_proxy_server, set_chained_proxy, silent_command, LAST_PAC_URL,
+};
 
-/// Removes the PAC URL and disables the proxy flag in the WinINet registry values.
+/// Reads `ProxyEnable` and `ProxyServer` from Windows Internet Settings.
+/// If an active third-party proxy is found, saves it to `CHAINED_PROXY`.
+pub(super) fn detect_and_save_windows_chained_proxy(gateway_port: Option<u16>) -> Option<String> {
+    let enable_output = silent_command("reg")
+        .args([
+            "query",
+            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings",
+            "/v",
+            "ProxyEnable",
+        ])
+        .output()
+        .ok()?;
+    let enable_stdout = String::from_utf8_lossy(&enable_output.stdout);
+    let proxy_enable = parse_reg_dword(&enable_stdout, "ProxyEnable").unwrap_or(0);
+
+    if proxy_enable == 1 {
+        let server_output = silent_command("reg")
+            .args([
+                "query",
+                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings",
+                "/v",
+                "ProxyServer",
+            ])
+            .output()
+            .ok()?;
+        let server_stdout = String::from_utf8_lossy(&server_output.stdout);
+        if let Some(raw_server) = parse_reg_sz(&server_stdout, "ProxyServer") {
+            if let Some(target) = parse_windows_proxy_server(&raw_server, gateway_port) {
+                set_chained_proxy(Some(target.clone()));
+                return Some(target);
+            }
+        }
+    }
+    None
+}
+
+/// Removes the PAC URL and disables or restores third-party chained proxy in the WinINet registry values.
 pub(super) fn disable_system_proxy() {
+    let chained = get_chained_proxy();
+
     // On Windows remove HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings\AutoConfigURL
     let _ = silent_command("reg")
         .args([
@@ -16,24 +57,60 @@ pub(super) fn disable_system_proxy() {
             "/f",
         ])
         .output();
-    let _ = silent_command("reg")
-        .args([
-            "add",
-            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings",
-            "/v",
-            "ProxyEnable",
-            "/t",
-            "REG_DWORD",
-            "/d",
-            "0",
-            "/f",
-        ])
-        .output();
+
+    if let Some(chained_target) = chained {
+        let _ = silent_command("reg")
+            .args([
+                "add",
+                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings",
+                "/v",
+                "ProxyServer",
+                "/t",
+                "REG_SZ",
+                "/d",
+                &chained_target,
+                "/f",
+            ])
+            .output();
+        let _ = silent_command("reg")
+            .args([
+                "add",
+                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings",
+                "/v",
+                "ProxyEnable",
+                "/t",
+                "REG_DWORD",
+                "/d",
+                "1",
+                "/f",
+            ])
+            .output();
+    } else {
+        let _ = silent_command("reg")
+            .args([
+                "add",
+                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings",
+                "/v",
+                "ProxyEnable",
+                "/t",
+                "REG_DWORD",
+                "/d",
+                "0",
+                "/f",
+            ])
+            .output();
+    }
     notify_windows_inet_refresh();
 }
 
 /// Writes the PAC URL into the WinINet registry values and records it in `configured`.
 pub(super) fn enable_system_proxy(pac_url: &str, configured: &mut Vec<String>) {
+    let gateway_port = parse_gateway_port_from_pac_url(pac_url);
+
+    // 1. Detect third-party proxy before overriding, chain it
+    detect_and_save_windows_chained_proxy(gateway_port);
+
+    // 2. Write AutoConfigURL
     let output = silent_command("reg")
         .args([
             "add",
@@ -48,6 +125,7 @@ pub(super) fn enable_system_proxy(pac_url: &str, configured: &mut Vec<String>) {
         ])
         .output();
 
+    // 3. Set ProxyEnable = 0 so WinINet routes via AutoConfigURL (PAC)
     let _ = silent_command("reg")
         .args([
             "add",
@@ -68,10 +146,18 @@ pub(super) fn enable_system_proxy(pac_url: &str, configured: &mut Vec<String>) {
     notify_windows_inet_refresh();
 }
 
-/// Windows branch of `refresh_if_services_changed`: re-applies the PAC URL when the registry value drifted.
+/// Windows branch of `refresh_if_services_changed`: re-applies the PAC URL when the registry value drifted
+/// or when a third-party VPN client enabled an explicit ProxyServer.
 pub(super) fn refresh_if_changed() -> bool {
     let pac = LAST_PAC_URL.lock().ok().and_then(|g| g.clone());
     if let Some(pac) = pac {
+        let gateway_port = parse_gateway_port_from_pac_url(&pac);
+
+        // Check if an external tool turned ProxyEnable back on
+        if detect_and_save_windows_chained_proxy(gateway_port).is_some() {
+            return enable_sysproxy(&pac).is_ok();
+        }
+
         if let Ok(output) = silent_command("reg")
             .args([
                 "query",

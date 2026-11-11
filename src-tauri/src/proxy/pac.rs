@@ -104,12 +104,22 @@ pub fn get_all_ai_domains_with_custom(matrix: &ProviderMatrix, custom_domains: &
 }
 
 /// Generates a standard Proxy Auto-Configuration (PAC) script routing AI domains to proxy.
-pub fn generate_pac_script(domains: &[String], proxy_host_port: &str) -> String {
+/// If `chained_proxy` is specified, non-AI traffic falls back to `PROXY chained_proxy; DIRECT`.
+/// Otherwise, non-AI traffic falls back directly to `DIRECT`.
+pub fn generate_pac_script(
+    domains: &[String],
+    proxy_host_port: &str,
+    chained_proxy: Option<&str>,
+) -> String {
     let domains_json = serde_json::to_string_pretty(domains).unwrap_or_else(|_| "[]".to_string());
+    let fallback = match chained_proxy.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(cp) => format!("PROXY {cp}; DIRECT"),
+        None => "DIRECT".to_string(),
+    };
 
     format!(
         r#"// Zastava Selective PAC Script
-// Automatically routes known AI domains through local hold proxy, keeping everything else DIRECT.
+// Automatically routes known AI domains through local hold proxy, keeping everything else chained or DIRECT.
 function FindProxyForURL(url, host) {{
     var aiDomains = {domains_json};
     host = (host || "").toLowerCase();
@@ -120,7 +130,7 @@ function FindProxyForURL(url, host) {{
             return "PROXY {proxy_host_port}";
         }}
     }}
-    return "DIRECT";
+    return "{fallback}";
 }}
 "#
     )
@@ -137,7 +147,7 @@ mod tests {
             "chatgpt.com".to_string(),
             "gemini.google.com".to_string(),
         ];
-        let pac = generate_pac_script(&domains, "127.0.0.1:8899");
+        let pac = generate_pac_script(&domains, "127.0.0.1:8899", None);
 
         assert!(pac.contains("function FindProxyForURL(url, host)"));
         assert!(pac.contains("\"claude.ai\""));
@@ -146,6 +156,19 @@ mod tests {
         assert!(pac.contains("return \"PROXY 127.0.0.1:8899\";"));
         assert!(pac.contains("return \"DIRECT\";"));
         assert!(pac.contains("host = (host || \"\").toLowerCase();"));
+    }
+
+    #[test]
+    fn test_pac_file_generation_with_chained_proxy() {
+        let domains = vec![
+            "claude.ai".to_string(),
+            "chatgpt.com".to_string(),
+        ];
+        let pac = generate_pac_script(&domains, "127.0.0.1:8899", Some("127.0.0.1:10808"));
+
+        assert!(pac.contains("function FindProxyForURL(url, host)"));
+        assert!(pac.contains("return \"PROXY 127.0.0.1:8899\";"));
+        assert!(pac.contains("return \"PROXY 127.0.0.1:10808; DIRECT\";"));
     }
 
     #[test]

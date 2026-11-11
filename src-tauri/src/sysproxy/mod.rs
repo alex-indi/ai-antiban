@@ -46,10 +46,202 @@ use std::sync::Mutex;
 static SYS_PROXY_ACTIVE: AtomicBool = AtomicBool::new(false);
 static CLI_PROTECTION_ACTIVE: AtomicBool = AtomicBool::new(false);
 static LAST_PAC_URL: Mutex<Option<String>> = Mutex::new(None);
+static CHAINED_PROXY: Mutex<Option<String>> = Mutex::new(None);
 
 const ZASTAVA_RC_START: &str = "# >>> Zastava AI CLI & IDE Guard >>>";
 const ZASTAVA_RC_END: &str = "# <<< Zastava AI CLI & IDE Guard <<<";
 const NO_PROXY_VALUE: &str = "localhost,127.0.0.1,::1,.local";
+
+/// Returns the currently discovered/configured upstream chained proxy (e.g. "127.0.0.1:10808"), if any.
+pub fn get_chained_proxy() -> Option<String> {
+    CHAINED_PROXY.lock().ok().and_then(|g| g.clone())
+}
+
+/// Sets or clears the upstream chained proxy with loop protection against Zastava's gateway.
+pub fn set_chained_proxy(proxy: Option<String>) {
+    if let Some(ref p) = proxy {
+        let current_gp = LAST_PAC_URL
+            .lock()
+            .ok()
+            .and_then(|g| g.as_deref().and_then(parse_gateway_port_from_pac_url));
+        if is_gateway_host_port(p, current_gp) {
+            return;
+        }
+    }
+    if let Ok(mut g) = CHAINED_PROXY.lock() {
+        *g = proxy;
+    }
+}
+
+/// Extracts gateway port from a PAC URL (e.g. "http://127.0.0.1:8899/proxy.pac" -> 8899).
+pub fn parse_gateway_port_from_pac_url(pac_url: &str) -> Option<u16> {
+    let without_scheme = pac_url
+        .strip_prefix("http://")
+        .or_else(|| pac_url.strip_prefix("https://"))
+        .unwrap_or(pac_url);
+    let host_port = without_scheme.split('/').next().unwrap_or("");
+    host_port.rsplit_once(':').and_then(|(_, p)| p.parse::<u16>().ok())
+}
+
+/// Checks whether `server:port` points to Zastava's own gateway port or default loopback ports,
+/// preventing recursive proxy loops.
+pub fn is_gateway_target(server: &str, port: u16, gateway_port: Option<u16>) -> bool {
+    if port == 0 {
+        return true;
+    }
+    if gateway_port.is_some_and(|gp| gp > 0 && port == gp) {
+        return true;
+    }
+    let s = server.trim().trim_start_matches('[').trim_end_matches(']').to_ascii_lowercase();
+    let is_loopback = s == "127.0.0.1" || s == "localhost" || s == "::1";
+    if is_loopback && (port == 8899 || port == 8900) {
+        return true;
+    }
+    false
+}
+
+/// Helper that checks `host:port` string against gateway loop.
+pub fn is_gateway_host_port(host_port: &str, gateway_port: Option<u16>) -> bool {
+    let trimmed = host_port.trim();
+    if let Some((host, port_str)) = trimmed.rsplit_once(':') {
+        match port_str.parse::<u16>() {
+            Ok(port) => is_gateway_target(host, port, gateway_port),
+            Err(_) => true,
+        }
+    } else {
+        true
+    }
+}
+
+/// Parses the output of macOS `networksetup -getwebproxy <service>` or `-getsecurewebproxy <service>`.
+/// Returns `Some((server, port))` only when enabled is "Yes", server is non-empty, and port > 0.
+pub fn parse_networksetup_webproxy_output(output: &str) -> Option<(String, u16)> {
+    let mut enabled = false;
+    let mut server = String::new();
+    let mut port: u16 = 0;
+
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if let Some((k, v)) = trimmed.split_once(':') {
+            let key = k.trim().to_ascii_lowercase();
+            let val = v.trim();
+            match key.as_str() {
+                "enabled" => {
+                    enabled = val.eq_ignore_ascii_case("yes");
+                }
+                "server" => {
+                    server = val.to_string();
+                }
+                "port" => {
+                    port = val.parse::<u16>().unwrap_or(0);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    if enabled && !server.is_empty() && port > 0 {
+        Some((server, port))
+    } else {
+        None
+    }
+}
+
+/// Parses Windows registry ProxyServer value into a `host:port` string.
+/// Supports both plain format "127.0.0.1:10808" and protocol format "http=127.0.0.1:10808;https=127.0.0.1:10808".
+/// Returns `None` if the proxy points to Zastava's gateway (loop prevention) or is invalid.
+pub fn parse_windows_proxy_server(raw: &str, gateway_port: Option<u16>) -> Option<String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+
+    let candidate = if raw.contains('=') {
+        let parts: Vec<&str> = raw.split(';').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+        let find_proto = |proto: &str| -> Option<&str> {
+            parts.iter().find_map(|p| {
+                let (k, v) = p.split_once('=')?;
+                if k.trim().eq_ignore_ascii_case(proto) {
+                    Some(v.trim())
+                } else {
+                    None
+                }
+            })
+        };
+
+        find_proto("https")
+            .or_else(|| find_proto("http"))
+            .or_else(|| find_proto("socks"))
+            .or_else(|| {
+                parts.first().and_then(|p| {
+                    p.split_once('=').map(|(_, v)| v.trim()).or(Some(p))
+                })
+            })
+    } else {
+        Some(raw)
+    };
+
+    let target = candidate?.trim();
+    if target.is_empty() {
+        return None;
+    }
+
+    let clean_target = target
+        .strip_prefix("http://")
+        .or_else(|| target.strip_prefix("https://"))
+        .or_else(|| target.strip_prefix("socks://"))
+        .unwrap_or(target);
+
+    let (host, port_str) = clean_target.rsplit_once(':')?;
+    let port = port_str.parse::<u16>().ok()?;
+    if port == 0 {
+        return None;
+    }
+
+    let clean_host = host.trim().trim_start_matches('[').trim_end_matches(']').to_string();
+    if clean_host.is_empty() {
+        return None;
+    }
+
+    if is_gateway_target(&clean_host, port, gateway_port) {
+        return None;
+    }
+
+    Some(format!("{clean_host}:{port}"))
+}
+
+/// Parses a REG_DWORD integer value from Windows `reg query` output.
+pub fn parse_reg_dword(output: &str, value_name: &str) -> Option<u32> {
+    for line in output.lines() {
+        let trimmed = line.trim();
+        let parts: Vec<&str> = trimmed.split_whitespace().collect();
+        if parts.len() >= 3
+            && parts[0].eq_ignore_ascii_case(value_name)
+            && parts[1].eq_ignore_ascii_case("REG_DWORD")
+        {
+            let v = parts[2].trim_start_matches("0x").trim_start_matches("0X");
+            return u32::from_str_radix(v, 16).or_else(|_| parts[2].parse::<u32>()).ok();
+        }
+    }
+    None
+}
+
+/// Parses a REG_SZ string value from Windows `reg query` output.
+pub fn parse_reg_sz(output: &str, value_name: &str) -> Option<String> {
+    for line in output.lines() {
+        let trimmed = line.trim();
+        let parts: Vec<&str> = trimmed.split_whitespace().collect();
+        if parts.len() >= 2
+            && parts[0].eq_ignore_ascii_case(value_name)
+            && parts[1].eq_ignore_ascii_case("REG_SZ")
+        {
+            let idx = trimmed.find("REG_SZ")?;
+            let rest = trimmed[idx + 6..].trim();
+            return Some(rest.to_string());
+        }
+    }
+    None
+}
 
 /// Spawns a Command configured on Windows with `CREATE_NO_WINDOW` (0x08000000)
 /// to completely prevent cmd.exe / PowerShell / Terminal console windows flashing.
@@ -101,6 +293,7 @@ pub fn disable_all_sysproxy() {
     if let Ok(mut g) = LAST_PAC_URL.lock() {
         *g = None;
     }
+    set_chained_proxy(None);
 }
 
 /// Enables systemic PAC proxy with the given PAC URL (e.g. "http://127.0.0.1:8899/proxy.pac").
@@ -308,5 +501,95 @@ mod tests {
         assert!(!claude_cleaned.contains("Europe/Helsinki"));
 
         let _ = fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn test_parse_networksetup_webproxy_output() {
+        let active_output = "Enabled: Yes\nServer: 127.0.0.1\nPort: 10808\nAuthenticated Proxy Enabled: 0\n";
+        let parsed = parse_networksetup_webproxy_output(active_output);
+        assert_eq!(parsed, Some(("127.0.0.1".to_string(), 10808)));
+
+        // Test loop prevention on Zastava's gateway
+        assert!(!is_gateway_target("127.0.0.1", 10808, Some(8899)));
+        assert!(is_gateway_target("127.0.0.1", 8899, Some(8899)));
+        assert!(is_gateway_target("localhost", 8899, None));
+        assert!(is_gateway_target("127.0.0.1", 8900, None));
+        assert!(is_gateway_target("127.0.0.1", 0, None));
+
+        let disabled_output = "Enabled: No\nServer: amrika-panel.nomadnocode.com\nPort: 11443\nAuthenticated Proxy Enabled: 0\n";
+        assert_eq!(parse_networksetup_webproxy_output(disabled_output), None);
+
+        let empty_output = "";
+        assert_eq!(parse_networksetup_webproxy_output(empty_output), None);
+    }
+
+    #[test]
+    fn test_parse_windows_proxy_server_and_loop_prevention() {
+        // Plain format
+        assert_eq!(
+            parse_windows_proxy_server("127.0.0.1:10808", Some(8899)),
+            Some("127.0.0.1:10808".to_string())
+        );
+
+        // Protocol formats
+        assert_eq!(
+            parse_windows_proxy_server("http=127.0.0.1:10808;https=127.0.0.1:10808", Some(8899)),
+            Some("127.0.0.1:10808".to_string())
+        );
+        assert_eq!(
+            parse_windows_proxy_server("http=127.0.0.1:10808;https=127.0.0.1:2080", Some(8899)),
+            Some("127.0.0.1:2080".to_string())
+        );
+        assert_eq!(
+            parse_windows_proxy_server("socks=127.0.0.1:10808", Some(8899)),
+            Some("127.0.0.1:10808".to_string())
+        );
+
+        // Loop prevention: Zastava's active gateway port or default ports
+        assert_eq!(parse_windows_proxy_server("127.0.0.1:8899", Some(8899)), None);
+        assert_eq!(
+            parse_windows_proxy_server("http=127.0.0.1:8899;https=127.0.0.1:8899", Some(8899)),
+            None
+        );
+        assert_eq!(parse_windows_proxy_server("localhost:8900", None), None);
+        assert_eq!(parse_windows_proxy_server("", Some(8899)), None);
+    }
+
+    #[test]
+    fn test_parse_reg_dword_and_sz() {
+        let dword_sample = "HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings\n    ProxyEnable    REG_DWORD    0x1\n";
+        assert_eq!(parse_reg_dword(dword_sample, "ProxyEnable"), Some(1));
+
+        let sz_sample = "HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings\n    ProxyServer    REG_SZ    http=127.0.0.1:10808;https=127.0.0.1:10808\n";
+        assert_eq!(
+            parse_reg_sz(sz_sample, "ProxyServer"),
+            Some("http=127.0.0.1:10808;https=127.0.0.1:10808".to_string())
+        );
+    }
+
+    #[test]
+    fn test_get_set_chained_proxy_loop_guard() {
+        set_chained_proxy(Some("127.0.0.1:10808".to_string()));
+        assert_eq!(get_chained_proxy(), Some("127.0.0.1:10808".to_string()));
+
+        // Setting Zastava default port should be rejected by loop guard
+        set_chained_proxy(Some("127.0.0.1:8899".to_string()));
+        assert_ne!(get_chained_proxy(), Some("127.0.0.1:8899".to_string()));
+
+        set_chained_proxy(None);
+        assert_eq!(get_chained_proxy(), None);
+    }
+
+    #[test]
+    fn test_parse_gateway_port_from_pac_url() {
+        assert_eq!(
+            parse_gateway_port_from_pac_url("http://127.0.0.1:8899/proxy.pac"),
+            Some(8899)
+        );
+        assert_eq!(
+            parse_gateway_port_from_pac_url("http://127.0.0.1:8900/pac.js"),
+            Some(8900)
+        );
+        assert_eq!(parse_gateway_port_from_pac_url("127.0.0.1:8899"), Some(8899));
     }
 }

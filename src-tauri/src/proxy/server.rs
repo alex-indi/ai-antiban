@@ -195,8 +195,13 @@ impl ProxyServer {
         let method = parts.next().unwrap_or("");
         let target = parts.next().unwrap_or("");
 
-        // 1. Route GET /proxy.pac (supports relative "/proxy.pac" or full "http://127.0.0.1:8899/proxy.pac")
-        if method == "GET" && (target.starts_with("/proxy.pac") || target.contains("/proxy.pac")) {
+        // 1. Route GET /proxy.pac or /pac.js (supports relative "/proxy.pac" or full "http://127.0.0.1:8899/proxy.pac")
+        if method == "GET"
+            && (target.starts_with("/proxy.pac")
+                || target.contains("/proxy.pac")
+                || target.starts_with("/pac.js")
+                || target.contains("/pac.js"))
+        {
             return self.handle_pac_request(&mut client).await;
         }
 
@@ -216,7 +221,18 @@ impl ProxyServer {
         let matrix = self.auditor.rules.provider_matrix.read().await;
         let custom_domains = self.state.get_custom_ai_domains().await;
         let domains = crate::proxy::pac::get_all_ai_domains_with_custom(&matrix, &custom_domains);
-        let pac_script = generate_pac_script(&domains, &self.bound_addr.to_string());
+
+        let gateway_port = self.bound_addr.port();
+        let chained_proxy = crate::sysproxy::get_chained_proxy().filter(|cp| {
+            let port = cp.rsplit_once(':').and_then(|(_, p)| p.parse::<u16>().ok()).unwrap_or(0);
+            port != gateway_port && port != 0
+        });
+
+        let pac_script = generate_pac_script(
+            &domains,
+            &self.bound_addr.to_string(),
+            chained_proxy.as_deref(),
+        );
 
         let response = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: application/x-ns-proxy-autoconfig\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
